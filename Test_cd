@@ -46,59 +46,53 @@ def calcular_curva_forward(df_dia, nodos_fijos, dias_shift=1):
 
 
 
-# --- Carga y Procesamiento del Histórico ---
 
-# 1. Cargar tu archivo histórico (el de la imagen 5)
-ruta_historico = 'ruta_a_tu_archivo_historico.xlsx'
-df_historico = pd.read_excel(ruta_historico)
-df_historico['Fecha'] = pd.to_datetime(df_historico['Fecha'])
+import pandas as pd
 
-# IMPORTANTE: Renombrar 'SBP_rate' a 'Yield' si necesario y asegurar que existe 'Dias'
-# Si no tienes 'Dias', debes calcularla antes de este punto.
-df_historico = df_historico.rename(columns={'SBP_rate': 'Yield'})
-# Ejemplo hipotético si tuvieras que calcular días aquí:
-# df_historico['Maturity_Date'] = ... alguna lógica para obtener la fecha fin ...
-# df_historico['Dias'] = (df_historico['Maturity_Date'] - df_historico['Fecha']).dt.days
+# --- CARGA Y PREPARACIÓN DE DATOS ---
+# Cambia las rutas por los nombres o rutas exactas de tus archivos
+df_cdbcrp = pd.read_excel('ruta_a_tu_historico_cdbcrp.xlsx')
+df_tibo = pd.read_excel('ruta_a_tu_historico_tibo.xlsx', sheet_name='Diarias')
+
+# Aseguramos que la columna 'Fecha' sea reconocida como formato de fecha
+df_cdbcrp['Fecha'] = pd.to_datetime(df_cdbcrp['Fecha'])
+df_tibo['Fecha'] = pd.to_datetime(df_tibo['Fecha'])
+
+# Preparar TIBO: Le agregamos el Día 1 y un ISIN referencial para que cuadre
+df_tibo['Dias'] = 1
+df_tibo['ISIN'] = 'TIBO'
+
+# Juntar ambos históricos (Pandas alinea Fecha, Yield y Dias automáticamente)
+insumos_historicos = pd.concat([df_tibo, df_cdbcrp], ignore_index=True)
 
 
-# 2. Definir parámetros fijos
-nodos_deseados = [1, 7, 14, 21, 30, 60, 90, 180, 360] # Tus nodos estándar
+# --- PROCESAMIENTO MASIVO ---
+nodos_deseados = [1, 7, 14, 21, 30, 60, 90, 180, 360] 
 lista_de_resultados = []
 
 print("Iniciando cálculo masivo...")
 
-# 3. El corazón del proceso: GROUPBY
-# Esto agrupa los datos por fecha. 'fecha_idx' es la fecha del grupo, 
-# 'grupo_df' es el pequeño DataFrame que solo contiene datos de ESA fecha.
-for fecha_idx, grupo_df in df_historico.groupby('Fecha'):
-    
-    # Aplicamos nuestra función a este día específico
+for fecha_idx, grupo_df in insumos_historicos.groupby('Fecha'):
     try:
+        # Usamos tu función matemática intacta
         df_fwd_dia = calcular_curva_forward(df_dia=grupo_df, 
                                             nodos_fijos=nodos_deseados, 
                                             dias_shift=1)
         
-        # Le agregamos la fecha para saber a qué día pertenece este cálculo
-        df_fwd_dia['Fecha_Dato'] = fecha_idx
-        
-        # Guardamos el resultado en la lista
+        # Agregamos la fecha al resultado de ese día
+        df_fwd_dia['Fecha'] = fecha_idx
         lista_de_resultados.append(df_fwd_dia)
         
     except Exception as e:
         print(f"Error procesando la fecha {fecha_idx.date()}: {e}")
         continue
 
-# 4. Consolidar todo en un solo gran DataFrame
+# --- RESULTADO FINAL ---
+# Consolidar todo en un solo DataFrame
 df_final_historico = pd.concat(lista_de_resultados, ignore_index=True)
 
-# Reordenar columnas para que se vea bien
-df_final_historico = df_final_historico[['Fecha_Dato', 'Nodo', 'Yield_Base', 'Forward_Calculado']]
+# Ordenar columnas para mayor claridad
+df_final_historico = df_final_historico[['Fecha', 'Nodo', 'Yield_Base', 'Forward_Calculado']]
 
-print("Cálculo finalizado.")
+print("Cálculo finalizado exitosamente.")
 print(df_final_historico.head(15))
-
-# Opcional: Exportar a Excel
-# df_final_historico.to_excel("Resultado_Forwards_Historico.xlsx", index=False)
-
-    
-    return df_resultado
