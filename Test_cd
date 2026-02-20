@@ -1,0 +1,104 @@
+import pandas as pd
+import numpy as np
+
+# --- Definición de la Función ---
+def calcular_curva_forward(df_dia, nodos_fijos, dias_shift=1):
+    """
+    Toma un DataFrame de UN SOLO DÍA (con columnas 'Dias' y 'Yield'),
+    interpola la curva base y la curva desplazada, y calcula los forwards.
+    """
+    # 1. Asegurar orden y extraer vectores
+    df_dia = df_dia.sort_values('Dias')
+    dias_conocidos = df_dia['Dias'].values
+    # Asumo que la columna de tasa se llama 'Yield'. Si es 'SBP_rate', cámbialo aquí.
+    yields_conocidos = df_dia['Yield'].values 
+
+    # 2. Interpolación Curva Base (t1, r1)
+    # Si algún nodo es menor al mínimo día disponible, repetirá el primer valor (extrapolación plana)
+    r1_interp = np.interp(nodos_fijos, dias_conocidos, yields_conocidos)
+    t1 = np.array(nodos_fijos)
+    r1 = r1_interp / 100 # Dividir por 100 para la fórmula
+
+    # 3. Interpolación Curva Desplazada (t2, r2)
+    # Creamos los nodos futuros (ej. nodo 7 pasa a ser día 8)
+    t2 = t1 + dias_shift 
+    r2_interp = np.interp(t2, dias_conocidos, yields_conocidos)
+    r2 = r2_interp / 100
+
+    # 4. Cálculo Vectorizado del Forward (Sin bucle for)
+    # Aplicamos la fórmula corregida (usando t1 al final) a todos los elementos a la vez
+    # Usamos np.where para evitar división por cero si el primer nodo es 0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        fwd_calc = (((1 + r2)**(t2 / 360)) / ((1 + r1)**(dias_shift / 360)))**(360 / t1) - 1
+        # Corregir si el primer nodo es 0 (el forward 0d0d no tiene sentido así, suele ser la tasa overnight)
+        fwd_calc = np.where(t1 == 0, r1, fwd_calc) 
+
+    # 5. Crear DataFrame de resultados
+    df_resultado = pd.DataFrame({
+        'Nodo': t1,
+        'Yield_Base': r1_interp,
+        'Forward_Calculado': fwd_calc * 100
+    })
+
+
+
+
+
+
+
+# --- Carga y Procesamiento del Histórico ---
+
+# 1. Cargar tu archivo histórico (el de la imagen 5)
+ruta_historico = 'ruta_a_tu_archivo_historico.xlsx'
+df_historico = pd.read_excel(ruta_historico)
+df_historico['Fecha'] = pd.to_datetime(df_historico['Fecha'])
+
+# IMPORTANTE: Renombrar 'SBP_rate' a 'Yield' si necesario y asegurar que existe 'Dias'
+# Si no tienes 'Dias', debes calcularla antes de este punto.
+df_historico = df_historico.rename(columns={'SBP_rate': 'Yield'})
+# Ejemplo hipotético si tuvieras que calcular días aquí:
+# df_historico['Maturity_Date'] = ... alguna lógica para obtener la fecha fin ...
+# df_historico['Dias'] = (df_historico['Maturity_Date'] - df_historico['Fecha']).dt.days
+
+
+# 2. Definir parámetros fijos
+nodos_deseados = [1, 7, 14, 21, 30, 60, 90, 180, 360] # Tus nodos estándar
+lista_de_resultados = []
+
+print("Iniciando cálculo masivo...")
+
+# 3. El corazón del proceso: GROUPBY
+# Esto agrupa los datos por fecha. 'fecha_idx' es la fecha del grupo, 
+# 'grupo_df' es el pequeño DataFrame que solo contiene datos de ESA fecha.
+for fecha_idx, grupo_df in df_historico.groupby('Fecha'):
+    
+    # Aplicamos nuestra función a este día específico
+    try:
+        df_fwd_dia = calcular_curva_forward(df_dia=grupo_df, 
+                                            nodos_fijos=nodos_deseados, 
+                                            dias_shift=1)
+        
+        # Le agregamos la fecha para saber a qué día pertenece este cálculo
+        df_fwd_dia['Fecha_Dato'] = fecha_idx
+        
+        # Guardamos el resultado en la lista
+        lista_de_resultados.append(df_fwd_dia)
+        
+    except Exception as e:
+        print(f"Error procesando la fecha {fecha_idx.date()}: {e}")
+        continue
+
+# 4. Consolidar todo en un solo gran DataFrame
+df_final_historico = pd.concat(lista_de_resultados, ignore_index=True)
+
+# Reordenar columnas para que se vea bien
+df_final_historico = df_final_historico[['Fecha_Dato', 'Nodo', 'Yield_Base', 'Forward_Calculado']]
+
+print("Cálculo finalizado.")
+print(df_final_historico.head(15))
+
+# Opcional: Exportar a Excel
+# df_final_historico.to_excel("Resultado_Forwards_Historico.xlsx", index=False)
+
+    
+    return df_resultado
