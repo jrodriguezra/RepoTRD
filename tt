@@ -1,36 +1,154 @@
-import pandas as pd
-from datetime import datetime
-import tkinter as tk
-from tkinter import filedialog
+import statsmodels.api as sm
 
-# Opens a window to pick your TXT file
+def regression_with_newey_west(actual, forward, max_lags=5):
+    """
+    Regression with Newey-West HAC standard errors.
+    
+    Tests:
+    1. H0: α = 0
+    2. H0: β = 1
+    3. H0: α = 0 AND β = 1 (joint)
+    """
+    
+    # Drop NaNs
+    df = pd.DataFrame({'actual': actual, 'forward': forward}).dropna()
+    
+    y = df['actual'].values
+    X = sm.add_constant(df['forward'].values)
+    
+    # Regression with Newey-West SE
+    model = sm.OLS(y, X).fit(
+        cov_type='HAC',
+        cov_kwds={'maxlags': max_lags}
+    )
+    
+    α = model.params[0]
+    β = model.params[1]
+    se_α = model.bse[0]
+    se_β = model.bse[1]
+    
+    print("="*70)
+    print("REGRESSION WITH NEWEY-WEST SE")
+    print("="*70)
+    print(f"\nModel: Actual = α + β × Forward + ε")
+    print(f"\nCoefficients:")
+    print(f"  α (intercept): {α:.6f}")
+    print(f"  β (slope):     {β:.6f}")
+    print(f"\nNewey-West SE:")
+    print(f"  SE(α):         {se_α:.6f}")
+    print(f"  SE(β):         {se_β:.6f}")
+    print(f"\nR²:              {model.rsquared:.4f}")
+    
+    # ═════════════════════════════════════════════════════════
+    # TEST 1: α = 0?
+    # ═════════════════════════════════════════════════════════
+    
+    print("\n" + "-"*70)
+    print("TEST 1: H0: α = 0 (No level bias)")
+    print("-"*70)
+    
+    t_α = α / se_α
+    p_α = 2 * (1 - stats.t.cdf(abs(t_α), df=len(y)-2))
+    
+    print(f"t-statistic: {t_α:.3f}")
+    print(f"p-value:     {p_α:.4f}")
+    
+    if p_α < 0.05:
+        print(f"❌ REJECT H0: α = {α:.4f} ≠ 0 (level bias exists)")
+    else:
+        print(f"✅ Cannot reject H0: α ≈ 0 (no level bias)")
+    
+    # ═════════════════════════════════════════════════════════
+    # TEST 2: β = 1?
+    # ═════════════════════════════════════════════════════════
+    
+    print("\n" + "-"*70)
+    print("TEST 2: H0: β = 1 (Perfect forecast)")
+    print("-"*70)
+    
+    t_β = (β - 1) / se_β
+    p_β = 2 * (1 - stats.t.cdf(abs(t_β), df=len(y)-2))
+    
+    print(f"t-statistic: {t_β:.3f}")
+    print(f"p-value:     {p_β:.4f}")
+    
+    if p_β < 0.05:
+        print(f"❌ REJECT H0: β = {β:.4f} ≠ 1 (scale bias exists)")
+        if β < 1:
+            print("   → Forward overreacts (changes too much)")
+        else:
+            print("   → Forward underreacts (changes too little)")
+    else:
+        print(f"✅ Cannot reject H0: β ≈ 1 (no scale bias)")
+    
+    # ═════════════════════════════════════════════════════════
+    # TEST 3: Joint Test (α=0 AND β=1)
+    # ═════════════════════════════════════════════════════════
+    
+    print("\n" + "-"*70)
+    print("TEST 3: JOINT TEST H0: α=0 AND β=1")
+    print("-"*70)
+    
+    # F-test (Wald test)
+    hypotheses = '(const = 0), (forward = 1)'
+    f_test = model.f_test(hypotheses)
+    
+    print(f"F-statistic: {f_test.fvalue[0][0]:.3f}")
+    print(f"p-value:     {f_test.pvalue:.4f}")
+    
+    if f_test.pvalue < 0.05:
+        print("❌ REJECT H0: Forward is BIASED")
+        print("   At least one coefficient is wrong")
+    else:
+        print("✅ Cannot reject H0: Forward is UNBIASED")
+        print("   Both α≈0 and β≈1 hold")
+    
+    # ═════════════════════════════════════════════════════════
+    # OVERALL CONCLUSION
+    # ═════════════════════════════════════════════════════════
+    
+    print("\n" + "="*70)
+    print("OVERALL CONCLUSION")
+    print("="*70)
+    
+    if f_test.pvalue >= 0.05:
+        print("\n✅ Forward curve is UNBIASED predictor")
+        print("   No systematic errors detected")
+    else:
+        print("\n❌ Forward curve is BIASED predictor")
+        
+        if p_α < 0.05 and p_β >= 0.05:
+            print("   Type: LEVEL BIAS")
+            print(f"   Forward systematically {'high' if α > 0 else 'low'} by {abs(α):.4f}")
+        elif p_α >= 0.05 and p_β < 0.05:
+            print("   Type: SCALE BIAS")
+            if β < 1:
+                print(f"   Forward overreacts (β={β:.3f} < 1)")
+            else:
+                print(f"   Forward underreacts (β={β:.3f} > 1)")
+        else:
+            print("   Type: BOTH LEVEL AND SCALE BIAS")
+    
+    print("="*70 + "\n")
+    
+    return {
+        'alpha': α,
+        'beta': β,
+        'se_alpha': se_α,
+        'se_beta': se_β,
+        't_alpha': t_α,
+        'p_alpha': p_α,
+        't_beta': t_β,
+        'p_beta': p_β,
+        'f_stat': f_test.fvalue[0][0],
+        'p_joint': f_test.pvalue,
+        'is_unbiased': f_test.pvalue >= 0.05,
+        'model': model
+    }
 
-root = tk.Tk()
-root.withdraw()
-input_txt = filedialog.askopenfilename(title=“Select your TXT file”, filetypes=[(“Text files”, “*.txt”)])
-
-if not input_txt:
-print(“No file selected.”)
-else:
-converted_dates = []
-
-```
-with open(input_txt, "r") as f:
-    for line in f:
-        raw = line.strip()
-        if not raw:
-            continue
-        try:
-            date_obj = datetime.strptime(raw, "%m/%d/%Y")
-            converted_dates.append(date_obj.strftime("%d/%m/%Y"))
-        except ValueError:
-            print(f"Skipping invalid date: '{raw}'")
-            converted_dates.append(None)
-
-# Saves the Excel file in the same folder as the TXT file
-output_xlsx = input_txt.replace(".txt", "_converted.xlsx")
-
-df = pd.DataFrame(converted_dates, columns=["Date (dd/MM/yyyy)"])
-df.to_excel(output_xlsx, index=False)
-print(f"Done! File saved to: {output_xlsx}")
-```
+# Run
+results = regression_with_newey_west(
+    actual=df['Actual_Spot'],
+    forward=df['Forward_1d'],
+    max_lags=5
+)
