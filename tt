@@ -1,0 +1,33 @@
+import pandas as pd
+from datetime import datetime
+
+def convert_dates_txt_to_excel(input_txt: str, output_xlsx: str):
+“””
+Reads a .txt file with dates in MM/dd/yyyy format,
+and saves an Excel file with dates in dd/MM/yyyy format.
+“””
+converted_dates = []
+
+```
+with open(input_txt, "r") as f:
+    for line in f:
+        raw = line.strip()
+        if not raw:
+            continue  # skip empty lines
+        try:
+            # Parse MM/dd/yyyy
+            date_obj = datetime.strptime(raw, "%m/%d/%Y")
+            # Format as dd/MM/yyyy
+            converted_dates.append(date_obj.strftime("%d/%m/%Y"))
+        except ValueError:
+            print(f"Skipping invalid date: '{raw}'")
+            converted_dates.append(None)
+
+df = pd.DataFrame(converted_dates, columns=["Date (dd/MM/yyyy)"])
+df.to_excel(output_xlsx, index=False)
+print(f"Done! Excel saved to: {output_xlsx}")
+```
+
+# — Usage —
+
+convert_dates_txt_to_excel(“input_dates.txt”, “output_dates.xlsx”)
