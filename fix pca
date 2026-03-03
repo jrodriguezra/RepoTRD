@@ -1,27 +1,28 @@
-target_maturities = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-results = {}
+# Residuals and std
+residuals = X - X_reconstructed_3          # shape: (dates, maturities)
+residuals_std = residuals.std(axis=0)       # std per maturity node
 
-for Fecha, group in df_clean_filtered.groupby("Fecha"):
-    mats = group["Maturity"].to_numpy()
-    yields = group["FV.Rate"].to_numpy()
-    
-    if len(mats) >= 3:
-        # Sort by maturity — critical for np.interp to work correctly
-        sort_idx = np.argsort(mats)
-        mats = mats[sort_idx]
-        yields = yields[sort_idx]
-        
-        # Remove left/right=np.nan to allow edge interpolation
-        interpolated = np.interp(target_maturities, mats, yields)
-        results[Fecha] = interpolated
-    else:
-        results[Fecha] = [np.nan] * len(target_maturities)
+# Last reconstructed curve (already has means added back on line 13)
+last_curve = X_reconstructed_3_df.iloc[-1]
 
-df_interpol = pd.DataFrame.from_dict(
-    results,
-    orient="index",
-    columns=[f"{m}Y" for m in target_maturities]
-)
-df_interpol.index.name = "Fecha"
+upper_band = last_curve + 2 * residuals_std
+lower_band = last_curve - 2 * residuals_std
 
-print(df_interpol.isna().sum())  # Should be all zeros or very few
+plt.figure(figsize=(10, 5))
+
+# ✅ Plot FV curve
+plt.plot(target_maturities, last_curve, label="FV Curve", color="C0")
+
+# ✅ Plot bands — THIS WAS MISSING
+plt.fill_between(target_maturities, lower_band, upper_band, 
+                 alpha=0.2, color="C0", label="±2 Std Band")
+plt.plot(target_maturities, upper_band, linestyle="--", color="C0", linewidth=0.8)
+plt.plot(target_maturities, lower_band, linestyle="--", color="C0", linewidth=0.8)
+
+plt.title("FV Curve vs Actual")
+plt.xlabel("Tenor")
+plt.ylabel("YTM")
+plt.xticks(rotation=45)
+plt.legend()
+plt.tight_layout()
+plt.show()
