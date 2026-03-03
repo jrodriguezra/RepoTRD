@@ -1,20 +1,26 @@
-# Residuals and std
-residuals = X - X_reconstructed_3          # shape: (dates, maturities)
-residuals_std = residuals.std(axis=0)       # std per maturity node
+# Most recent actual curve
+actual_last = df_interpol.iloc[-1]
 
-# Last reconstructed curve (already has means added back on line 13)
+# Last reconstructed curve
 last_curve = X_reconstructed_3_df.iloc[-1]
+
+residuals = X - X_reconstructed_3
+residuals_std = residuals.std(axis=0)
 
 upper_band = last_curve + 2 * residuals_std
 lower_band = last_curve - 2 * residuals_std
 
 plt.figure(figsize=(10, 5))
 
-# ✅ Plot FV curve
+# FV (reconstructed) curve
 plt.plot(target_maturities, last_curve, label="FV Curve", color="C0")
 
-# ✅ Plot bands — THIS WAS MISSING
-plt.fill_between(target_maturities, lower_band, upper_band, 
+# ✅ Actual last curve
+plt.plot(target_maturities, actual_last, label=f"Actual ({df_interpol.index[-1].date()})", 
+         color="C1", linestyle="--", marker="o")
+
+# Bands
+plt.fill_between(target_maturities, lower_band, upper_band,
                  alpha=0.2, color="C0", label="±2 Std Band")
 plt.plot(target_maturities, upper_band, linestyle="--", color="C0", linewidth=0.8)
 plt.plot(target_maturities, lower_band, linestyle="--", color="C0", linewidth=0.8)
