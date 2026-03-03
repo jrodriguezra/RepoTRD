@@ -1,23 +1,27 @@
 target_maturities = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 results = {}
 
-for Fecha, group in df_clean.groupby("Fecha"):
+for Fecha, group in df_clean_filtered.groupby("Fecha"):
     mats = group["Maturity"].to_numpy()
     yields = group["FV.Rate"].to_numpy()
     
     if len(mats) >= 3:
-        interpolated = np.interp(target_maturities, mats, yields, 
-                                  left=np.nan, right=np.nan)
+        # Sort by maturity — critical for np.interp to work correctly
+        sort_idx = np.argsort(mats)
+        mats = mats[sort_idx]
+        yields = yields[sort_idx]
+        
+        # Remove left/right=np.nan to allow edge interpolation
+        interpolated = np.interp(target_maturities, mats, yields)
         results[Fecha] = interpolated
     else:
         results[Fecha] = [np.nan] * len(target_maturities)
 
-# Build DataFrame once — no row-by-row assignment issues
 df_interpol = pd.DataFrame.from_dict(
-    results, 
-    orient="index", 
+    results,
+    orient="index",
     columns=[f"{m}Y" for m in target_maturities]
 )
 df_interpol.index.name = "Fecha"
 
-print(df_interpol)
+print(df_interpol.isna().sum())  # Should be all zeros or very few
