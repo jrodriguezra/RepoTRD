@@ -1,81 +1,10 @@
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import numpy as np
-
-# --- Data prep ---
-actual_last = df_interpol.drop(columns="Fecha").iloc[-1]
-last_curve  = X_reconstructed_3_df.iloc[-1]
-residuals   = X - X_reconstructed_3
-residuals_std = residuals.std(axis=0)
-
-upper_band = last_curve + 2 * residuals_std
-lower_band = last_curve - 2 * residuals_std
-
-# Rich/cheap in bps (positive = cheap, negative = rich)
-mispricing   = (actual_last - last_curve) * 100
-dist_upper   = (actual_last - upper_band) * 100
-dist_lower   = (actual_last - lower_band) * 100
-dist_fv      = mispricing  # same as mispricing
-
-# --- Layout: chart on top, table on bottom ---
-fig = plt.figure(figsize=(13, 9))
-gs  = gridspec.GridSpec(2, 1, height_ratios=[2, 1], hspace=0.45)
-
-# ── Chart ──────────────────────────────────────────────────────────────
-ax = fig.add_subplot(gs[0])
-
-ax.fill_between(target_maturities, lower_band, upper_band,
-                alpha=0.15, color="C0", label="±2 Std Band")
-ax.plot(target_maturities, upper_band, linestyle="--", color="C0", linewidth=0.8)
-ax.plot(target_maturities, lower_band, linestyle="--", color="C0", linewidth=0.8)
-ax.plot(target_maturities, last_curve,  label="FV Curve",  color="C0", linewidth=2)
-ax.plot(target_maturities, actual_last,
-        label=f"Actual ({df_interpol['Fecha'].iloc[-1].date()})",
-        color="C1", linestyle="--", marker="o")
-
-# ✅ Show every year on x-axis
-ax.set_xticks(target_maturities)
-ax.set_xticklabels([f"{m}Y" for m in target_maturities])
-
-ax.set_title("FV Curve vs Actual", fontsize=13, fontweight="bold")
-ax.set_xlabel("Tenor")
-ax.set_ylabel("YTM (%)")
-ax.legend()
-ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-# ── Table ──────────────────────────────────────────────────────────────
-ax2 = fig.add_subplot(gs[1])
-ax2.axis("off")
-
-col_labels = [f"{m}Y" for m in target_maturities]
-row_labels = [
-    "Actual (%)","FV (%)","Rich/Cheap (bps)","Dist to Upper (bps)","Dist to Lower (bps)"
-]
-
-table_data = [
-    [f"{actual_last[c]:.2f}"                        for c in actual_last.index],
-    [f"{last_curve[c]:.2f}"                          for c in last_curve.index],
-    [f"{mispricing[c]:+.1f}"                         for c in mispricing.index],
-    [f"{dist_upper[c]:+.1f}"                         for c in dist_upper.index],
-    [f"{dist_lower[c]:+.1f}"                         for c in dist_lower.index],
-]
-
-table = ax2.table(
-    cellText=table_data,
-    rowLabels=row_labels,
-    colLabels=col_labels,
-    cellLoc="center",
-    loc="center"
-)
-table.auto_set_font_size(False)
-table.set_fontsize(8.5)
-table.scale(1, 1.4)
-
-# Colour rich/cheap row: green = cheap (positive), red = rich (negative)
+# Colour only the nearest SD band row per tenor
 for j, val in enumerate(mispricing):
-    color = "#d4f0d4" if val > 0 else "#f0d4d4"
-    table[3, j].set_facecolor(color)   # row index 3 = Rich/Cheap row (0=header,1=Actual,2=FV,3=R/C)
-
-plt.suptitle("PCA Yield Curve — Fair Value Analysis", fontsize=14, fontweight="bold", y=1.01)
-plt.tight_layout()
-plt.show()
+    if val > 0:
+        # Actual is above FV → upper band is nearest → colour row 4 (Dist to Upper)
+        color = "#d4f0d4"
+        table[4, j].set_facecolor(color)
+    else:
+        # Actual is below FV → lower band is nearest → colour row 5 (Dist to Lower)
+        color = "#f0d4d4"
+        table[5, j].set_facecolor(color)
