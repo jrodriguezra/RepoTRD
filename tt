@@ -1,154 +1,168 @@
-import statsmodels.api as sm
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-def regression_with_newey_west(actual, forward, max_lags=5):
-    """
-    Regression with Newey-West HAC standard errors.
-    
-    Tests:
-    1. H0: α = 0
-    2. H0: β = 1
-    3. H0: α = 0 AND β = 1 (joint)
-    """
-    
-    # Drop NaNs
-    df = pd.DataFrame({'actual': actual, 'forward': forward}).dropna()
-    
-    y = df['actual'].values
-    X = sm.add_constant(df['forward'].values)
-    
-    # Regression with Newey-West SE
-    model = sm.OLS(y, X).fit(
-        cov_type='HAC',
-        cov_kwds={'maxlags': max_lags}
-    )
-    
-    α = model.params[0]
-    β = model.params[1]
-    se_α = model.bse[0]
-    se_β = model.bse[1]
-    
-    print("="*70)
-    print("REGRESSION WITH NEWEY-WEST SE")
-    print("="*70)
-    print(f"\nModel: Actual = α + β × Forward + ε")
-    print(f"\nCoefficients:")
-    print(f"  α (intercept): {α:.6f}")
-    print(f"  β (slope):     {β:.6f}")
-    print(f"\nNewey-West SE:")
-    print(f"  SE(α):         {se_α:.6f}")
-    print(f"  SE(β):         {se_β:.6f}")
-    print(f"\nR²:              {model.rsquared:.4f}")
-    
-    # ═════════════════════════════════════════════════════════
-    # TEST 1: α = 0?
-    # ═════════════════════════════════════════════════════════
-    
-    print("\n" + "-"*70)
-    print("TEST 1: H0: α = 0 (No level bias)")
-    print("-"*70)
-    
-    t_α = α / se_α
-    p_α = 2 * (1 - stats.t.cdf(abs(t_α), df=len(y)-2))
-    
-    print(f"t-statistic: {t_α:.3f}")
-    print(f"p-value:     {p_α:.4f}")
-    
-    if p_α < 0.05:
-        print(f"❌ REJECT H0: α = {α:.4f} ≠ 0 (level bias exists)")
-    else:
-        print(f"✅ Cannot reject H0: α ≈ 0 (no level bias)")
-    
-    # ═════════════════════════════════════════════════════════
-    # TEST 2: β = 1?
-    # ═════════════════════════════════════════════════════════
-    
-    print("\n" + "-"*70)
-    print("TEST 2: H0: β = 1 (Perfect forecast)")
-    print("-"*70)
-    
-    t_β = (β - 1) / se_β
-    p_β = 2 * (1 - stats.t.cdf(abs(t_β), df=len(y)-2))
-    
-    print(f"t-statistic: {t_β:.3f}")
-    print(f"p-value:     {p_β:.4f}")
-    
-    if p_β < 0.05:
-        print(f"❌ REJECT H0: β = {β:.4f} ≠ 1 (scale bias exists)")
-        if β < 1:
-            print("   → Forward overreacts (changes too much)")
-        else:
-            print("   → Forward underreacts (changes too little)")
-    else:
-        print(f"✅ Cannot reject H0: β ≈ 1 (no scale bias)")
-    
-    # ═════════════════════════════════════════════════════════
-    # TEST 3: Joint Test (α=0 AND β=1)
-    # ═════════════════════════════════════════════════════════
-    
-    print("\n" + "-"*70)
-    print("TEST 3: JOINT TEST H0: α=0 AND β=1")
-    print("-"*70)
-    
-    # F-test (Wald test)
-    hypotheses = '(const = 0), (forward = 1)'
-    f_test = model.f_test(hypotheses)
-    
-    print(f"F-statistic: {f_test.fvalue[0][0]:.3f}")
-    print(f"p-value:     {f_test.pvalue:.4f}")
-    
-    if f_test.pvalue < 0.05:
-        print("❌ REJECT H0: Forward is BIASED")
-        print("   At least one coefficient is wrong")
-    else:
-        print("✅ Cannot reject H0: Forward is UNBIASED")
-        print("   Both α≈0 and β≈1 hold")
-    
-    # ═════════════════════════════════════════════════════════
-    # OVERALL CONCLUSION
-    # ═════════════════════════════════════════════════════════
-    
-    print("\n" + "="*70)
-    print("OVERALL CONCLUSION")
-    print("="*70)
-    
-    if f_test.pvalue >= 0.05:
-        print("\n✅ Forward curve is UNBIASED predictor")
-        print("   No systematic errors detected")
-    else:
-        print("\n❌ Forward curve is BIASED predictor")
-        
-        if p_α < 0.05 and p_β >= 0.05:
-            print("   Type: LEVEL BIAS")
-            print(f"   Forward systematically {'high' if α > 0 else 'low'} by {abs(α):.4f}")
-        elif p_α >= 0.05 and p_β < 0.05:
-            print("   Type: SCALE BIAS")
-            if β < 1:
-                print(f"   Forward overreacts (β={β:.3f} < 1)")
-            else:
-                print(f"   Forward underreacts (β={β:.3f} > 1)")
-        else:
-            print("   Type: BOTH LEVEL AND SCALE BIAS")
-    
-    print("="*70 + "\n")
-    
-    return {
-        'alpha': α,
-        'beta': β,
-        'se_alpha': se_α,
-        'se_beta': se_β,
-        't_alpha': t_α,
-        'p_alpha': p_α,
-        't_beta': t_β,
-        'p_beta': p_β,
-        'f_stat': f_test.fvalue[0][0],
-        'p_joint': f_test.pvalue,
-        'is_unbiased': f_test.pvalue >= 0.05,
-        'model': model
-    }
+# ── CMT tenors to output (matching df_interpol columns 6Y-15Y)
 
-# Run
-results = regression_with_newey_west(
-    actual=df['Actual_Spot'],
-    forward=df['Forward_1d'],
-    max_lags=5
-)
+CMT_TENORS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+MIN_BONDS  = 3
+
+class MonotoneConvexCurve:
+
+```
+def __init__(self, maturities, yields_pct):
+    idx     = np.argsort(maturities)
+    self.t  = np.asarray(maturities, dtype=float)[idx]
+    self.y  = np.asarray(yields_pct,  dtype=float)[idx] / 100.0
+    self.n  = len(self.t)
+    self.Q  = self.y * self.t
+    self.f_disc = np.diff(self.Q) / np.diff(self.t)
+    self.f_node = self._node_forwards()
+
+def _node_forwards(self):
+    t, fd, n = self.t, self.f_disc, self.n
+    f = np.zeros(n)
+    for i in range(1, n - 1):
+        h_l  = t[i]   - t[i-1]
+        h_r  = t[i+1] - t[i]
+        f[i] = (fd[i-1] * h_r + fd[i] * h_l) / (h_l + h_r)
+    f[0]  = fd[0]  - 0.5 * (f[1]  - fd[0])
+    f[-1] = fd[-1] - 0.5 * (f[-2] - fd[-1])
+    return np.maximum(f, 1e-6)
+
+def _correct_fwd(self, f0, fd, f1):
+    etas  = np.linspace(0.01, 0.99, 300)
+    f_cur = (f0 * (1 - 4*etas + 3*etas**2)
+             + fd * 6*etas*(1 - etas)
+             + f1 * etas * (-2 + 3*etas))
+    if f_cur.min() >= 0:
+        return f0, fd, f1
+    g = (f0 * (1 - 4*etas + 3*etas**2)
+         + f1 * etas * (-2 + 3*etas))
+    w = 6 * etas * (1 - etas)
+    mask = w > 1e-12
+    fd_new = max(fd, np.max(-g[mask] / w[mask]) + 1e-8)
+    return max(f0, 1e-6), fd_new, max(f1, 1e-6)
+
+def _segment(self, t_query):
+    if t_query < self.t[0] or t_query > self.t[-1]:
+        return None
+    i = int(np.searchsorted(self.t, t_query, side='right')) - 1
+    return int(np.clip(i, 0, self.n - 2))
+
+def yield_at(self, t_query):
+    hit = np.where(np.abs(self.t - t_query) < 1e-9)[0]
+    if len(hit):
+        return float(self.y[hit[0]] * 100)
+    i = self._segment(t_query)
+    if i is None:
+        return np.nan
+    t0, t1 = self.t[i], self.t[i+1]
+    h   = t1 - t0
+    eta = (t_query - t0) / h
+    f0, fd, f1 = self._correct_fwd(
+        self.f_node[i], self.f_disc[i], self.f_node[i+1])
+    Q_t = self.Q[i] + h * (
+        f0 * (eta   - 2*eta**2 + eta**3)
+        + fd * (       3*eta**2 - 2*eta**3)
+        + f1 * (      -  eta**2 +   eta**3))
+    return float((Q_t / t_query) * 100)
+```
+
+# ── Build df_cmt from df_clean
+
+def build_cmt(df_clean, tenors=CMT_TENORS, min_bonds=MIN_BONDS):
+records = []
+skipped = 0
+for date, grp in df_clean.groupby(‘Fecha’):
+grp = (grp.dropna(subset=[‘Maturity’, ‘FV.Rate’])
+.sort_values(‘Maturity’)
+.drop_duplicates(‘Maturity’))
+if len(grp) < min_bonds:
+skipped += 1
+continue
+t     = grp[‘Maturity’].values
+y     = grp[‘FV.Rate’].values
+t_min = t.min()
+t_max = t.max()
+try:
+curve = MonotoneConvexCurve(t, y)
+row   = {‘Fecha’: date}
+for tau in tenors:
+col      = f’{tau}Y’
+row[col] = (round(curve.yield_at(tau), 4)
+if t_min <= tau <= t_max else np.nan)
+records.append(row)
+except Exception:
+skipped += 1
+df_cmt = (pd.DataFrame(records)
+.set_index(‘Fecha’)
+.sort_index())
+df_cmt.index.name = ‘Fecha’
+print(f’CMT built: {len(df_cmt):,} dates | skipped: {skipped:,}’)
+return df_cmt
+
+# ── Compare df_cmt vs df_interpol in bps
+
+def compare_curves(df_cmt, df_interpol, tenors=CMT_TENORS):
+cols = [f’{tau}Y’ for tau in tenors]
+
+```
+# handle Fecha as index or column in df_interpol
+if 'Fecha' in df_interpol.columns:
+    df_li = df_interpol.set_index('Fecha')[cols].copy()
+else:
+    df_li = df_interpol[cols].copy()
+
+df_mc  = df_cmt[cols].copy()
+shared = df_mc.index.intersection(df_li.index)
+df_mc  = df_mc.loc[shared]
+df_li  = df_li.loc[shared]
+
+# difference in bps: MC minus Linear
+df_diff = (df_mc - df_li) * 100
+
+stats = df_diff.describe().T[['mean', 'std', 'min', '25%', '50%', '75%', 'max']]
+stats.columns = ['Mean', 'Std', 'Min', 'P25', 'Median', 'P75', 'Max']
+stats = stats.round(3)
+print('\n── Difference MC minus Linear Interpolation (bps) ─────────────')
+print(stats.to_string())
+
+# boxplot
+fig, ax = plt.subplots(figsize=(13, 5))
+data_plot = [df_diff[c].dropna().values for c in cols]
+bp = ax.boxplot(
+    data_plot,
+    tick_labels=cols,
+    patch_artist=True,
+    medianprops=dict(color='black', linewidth=1.8),
+    flierprops=dict(marker='o', markersize=2, alpha=0.3, color='grey'),
+    whiskerprops=dict(linewidth=1.2),
+    capprops=dict(linewidth=1.2))
+colors = plt.cm.RdYlBu(np.linspace(0.1, 0.9, len(cols)))
+for patch, color in zip(bp['boxes'], colors):
+    patch.set_facecolor(color)
+    patch.set_alpha(0.75)
+ax.axhline(0, color='black', linewidth=1.0, linestyle='--', alpha=0.7)
+ax.set_title(
+    'Monotone Convex vs Linear Interpolation  —  Spread by CMT Node (bps)',
+    fontsize=12, fontweight='bold')
+ax.set_xlabel('CMT Tenor', fontsize=10)
+ax.set_ylabel('MC minus Linear  (bps)', fontsize=10)
+ax.grid(axis='y', linestyle=':', alpha=0.5)
+plt.tight_layout()
+plt.savefig('/mnt/user-data/outputs/cmt_comparison.png', dpi=150)
+plt.show()
+print('Boxplot saved to cmt_comparison.png')
+
+return df_diff, stats
+```
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+# plug in your actual df_clean and df_interpol below
+
+df_cmt = build_cmt(df_clean)
+print(df_cmt.head())
+
+df_diff, stats = compare_curves(df_cmt, df_interpol)
