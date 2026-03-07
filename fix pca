@@ -1,10 +1,548 @@
-# Colour only the nearest SD band row per tenor
-for j, val in enumerate(mispricing):
-    if val > 0:
-        # Actual is above FV → upper band is nearest → colour row 4 (Dist to Upper)
-        color = "#d4f0d4"
-        table[4, j].set_facecolor(color)
-    else:
-        # Actual is below FV → lower band is nearest → colour row 5 (Dist to Lower)
-        color = "#f0d4d4"
-        table[5, j].set_facecolor(color)
+# “””
+curve_cmt.py
+
+Constant Maturity Treasury (CMT) curve construction for PEN Soberanos
+using Monotone Convex interpolation (Hagan & West, 2006).
+
+Interpolation is applied DIRECTLY on par yields — no bootstrapping required.
+
+## Input
+
+df_clean : pd.DataFrame with columns:
+Fecha    : date
+Maturity : time to maturity in years (Act/365 basis)
+FV.Rate  : market bond yield in PERCENT (e.g. 7.05)
+
+## Output
+
+df_cmt     : daily CMT yields at [6,7,8,9,10,12,15]y in percent
+df_fwd     : daily implied forward rates at same tenors in percent
+df_roll    : carry + roll-down table per CMT tenor
+“””
+
+import numpy as np
+import pandas as pd
+from typing import List, Optional, Tuple
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+CMT_TENORS   = [6, 7, 8, 9, 10, 12, 15]   # output tenor grid (years)
+MIN_BONDS    = 3                            # minimum bonds to attempt fitting
+ROLL_HORIZONS = [3, 6, 12]                 # roll-down horizons in months
+
+# ── Core interpolation class ─────────────────────────────────────────────────
+
+class MonotoneConvexCurve:
+“””
+Monotone Convex interpolation applied directly to par yields.
+
+```
+Intuition
+---------
+Define Q(t) = y(t) * t  — the "cumulative yield area".
+The derivative dQ/dt = f(t) plays the role of an instantaneous
+forward rate in yield space.
+
+Within each segment [t_i, t_{i+1}], f(t) is a quadratic polynomial
+that:
+  - passes through the estimated node forwards f̂_i and f̂_{i+1}
+  - honours the discrete segment forward f_disc_i = ΔQ/Δt
+  - is corrected so f(t) ≥ 0 everywhere (no negative forwards)
+
+The yield at any point is then y(t) = Q(t) / t, where Q(t) is
+recovered by integrating the quadratic forward analytically.
+
+The method is LOCAL: a change to one bond only affects the two
+segments adjacent to it, not the rest of the curve.
+"""
+
+def __init__(self, maturities: np.ndarray, yields_pct: np.ndarray):
+    """
+    Parameters
+    ----------
+    maturities  : sorted array of bond maturities in years
+    yields_pct  : par yields in PERCENT (e.g. 7.05)
+    """
+    idx      = np.argsort(maturities)
+    self.t   = np.asarray(maturities, dtype=float)[idx]
+    self.y   = np.asarray(yields_pct, dtype=float)[idx] / 100.0  # → decimal
+    self.n   = len(self.t)
+
+    # Q_i = y_i * t_i  (cumulative yield × time at each node)
+    self.Q   = self.y * self.t
+
+    # Discrete "forward" in each interval: slope of Q between nodes
+    self.f_disc = np.diff(self.Q) / np.diff(self.t)  # length n-1
+
+    # Instantaneous node forwards (estimated from neighbors)
+    self.f_node = self._estimate_node_forwards()
+
+# ── Node forward estimation ───────────────────────────────────────────
+
+def _estimate_node_forwards(self) -> np.ndarray:
+    """
+    Estimate instantaneous forward f̂_i at each node as a
+    time-weighted average of the adjacent discrete forwards.
+    This ensures the interpolant is C1 continuous at nodes.
+    """
+    t, fd, n = self.t, self.f_disc, self.n
+    f = np.zeros(n)
+
+    # Interior nodes
+    for i in range(1, n - 1):
+        h_l  = t[i]   - t[i-1]
+        h_r  = t[i+1] - t[i]
+        f[i] = (fd[i-1] * h_r + fd[i] * h_l) / (h_l + h_r)
+
+    # Endpoint extrapolation (Hagan-West convention)
+    # Extrapolate one half-step beyond the first/last discrete forward
+    f[0]  = fd[0]  - 0.5 * (f[1]    - fd[0])
+    f[-1] = fd[-1] - 0.5 * (f[-2]   - fd[-1])
+
+    # Floor: forwards in yield space should not be negative for PEN
+    return np.maximum(f, 1e-6)
+
+# ── Monotonicity correction ───────────────────────────────────────────
+
+def _corrected_forwards(
+    self, f0: float, fd: float, f1: float
+) -> Tuple[float, float, float]:
+    """
+    Ensure the quadratic forward f(η) ≥ 0 on [0,1].
+
+    The forward within a segment is:
+        f(η) = f0*(1 - 4η + 3η²) + fd*6η(1-η) + f1*η(-2 + 3η)
+
+    Since 6η(1-η) ≥ 0, increasing fd raises the curve everywhere.
+    If the minimum of f is negative, we raise fd to the minimum
+    value that makes f(η) ≥ 0 everywhere.
+
+    Correction is computed by scanning over a fine η grid:
+        fd_min_required = max_η [ -g(η) / w(η) ]
+    where g(η) is the fd-independent part and w(η) = 6η(1-η).
+    """
+    # Evaluate minimum of quadratic forward on fine grid
+    etas  = np.linspace(0.01, 0.99, 300)
+    f_cur = (f0 * (1 - 4*etas + 3*etas**2) +
+             fd * 6*etas*(1 - etas) +
+             f1 * etas * (-2 + 3*etas))
+
+    if f_cur.min() >= 0:
+        return f0, fd, f1          # no correction needed
+
+    # g(η): part of f independent of fd
+    g_vals = (f0 * (1 - 4*etas + 3*etas**2) +
+              f1 * etas * (-2 + 3*etas))
+    w_vals = 6 * etas * (1 - etas)  # always ≥ 0
+
+    # Minimum fd required to keep f ≥ 0 everywhere
+    # (only relevant where w > 0, i.e. interior of segment)
+    mask        = w_vals > 1e-12
+    fd_required = np.max(-g_vals[mask] / w_vals[mask]) + 1e-8
+    fd_corrected = max(fd, fd_required)
+
+    return max(f0, 1e-6), fd_corrected, max(f1, 1e-6)
+
+# ── Segment interpolation ─────────────────────────────────────────────
+
+def _Q_at(self, t_query: float, i: int) -> float:
+    """
+    Evaluate Q(t_query) = ∫₀ᵗ f(s)ds within segment i → i+1.
+
+    The quadratic forward integrates analytically:
+        ∫₀^η f dη = f0*(η - 2η² + η³)
+                   + fd*(3η² - 2η³)
+                   + f1*(-η² + η³)
+    """
+    t0, t1   = self.t[i], self.t[i+1]
+    h        = t1 - t0
+    eta      = (t_query - t0) / h          # ∈ [0, 1]
+
+    f0, fd, f1 = self._corrected_forwards(
+        self.f_node[i], self.f_disc[i], self.f_node[i+1]
+    )
+
+    Q_t = self.Q[i] + h * (
+        f0 * (eta   - 2*eta**2 + eta**3) +
+        fd * (        3*eta**2 - 2*eta**3) +
+        f1 * (        - eta**2 +   eta**3)
+    )
+    return Q_t
+
+# ── Public interface ──────────────────────────────────────────────────
+
+def _find_segment(self, t_query: float) -> Optional[int]:
+    """Return index i such that t[i] ≤ t_query < t[i+1]."""
+    if t_query < self.t[0] or t_query > self.t[-1]:
+        return None
+    i = int(np.searchsorted(self.t, t_query, side='right')) - 1
+    return int(np.clip(i, 0, self.n - 2))
+
+def yield_at(self, t_query: float) -> Optional[float]:
+    """
+    Interpolated par yield at tenor t_query (years).
+    Returns value in PERCENT. Returns None if outside data range.
+    """
+    # Exact node hit
+    idx_exact = np.where(np.abs(self.t - t_query) < 1e-9)[0]
+    if len(idx_exact):
+        return float(self.y[idx_exact[0]] * 100)
+
+    i = self._find_segment(t_query)
+    if i is None:
+        return None
+
+    Q_t = self._Q_at(t_query, i)
+    return float((Q_t / t_query) * 100)
+
+def forward_at(self, t_query: float) -> Optional[float]:
+    """
+    Instantaneous forward rate at tenor t_query.
+    Returns value in PERCENT. Returns None if outside data range.
+
+    f(t) = dQ/dt evaluated at the normalized position within its segment.
+    """
+    i = self._find_segment(t_query)
+    if i is None:
+        return None
+
+    t0, t1 = self.t[i], self.t[i+1]
+    h       = t1 - t0
+    eta     = (t_query - t0) / h
+
+    f0, fd, f1 = self._corrected_forwards(
+        self.f_node[i], self.f_disc[i], self.f_node[i+1]
+    )
+
+    # Quadratic forward evaluated at η
+    f = (f0 * (1 - 4*eta + 3*eta**2) +
+         fd * 6 * eta * (1 - eta) +
+         f1 * eta * (-2 + 3*eta))
+
+    return float(f * 100)
+```
+
+# ── Daily curve builders ──────────────────────────────────────────────────────
+
+def build_cmt_table(
+df_clean: pd.DataFrame,
+tenors: List[float] = CMT_TENORS,
+min_bonds: int      = MIN_BONDS,
+) -> pd.DataFrame:
+“””
+Build a daily CMT yield table via Monotone Convex interpolation.
+
+```
+Returns
+-------
+df_cmt : DataFrame indexed by Fecha, columns CMT_6y … CMT_15y
+         Yields in PERCENT, NaN where tenor is outside data range.
+"""
+df = df_clean.copy()
+records, skipped = [], []
+
+for date, grp in df.groupby('Fecha'):
+    grp = (grp.dropna(subset=['Maturity', 'FV.Rate'])
+              .sort_values('Maturity')
+              .drop_duplicates('Maturity'))
+
+    if len(grp) < min_bonds:
+        skipped.append(date)
+        continue
+
+    t = grp['Maturity'].values
+    y = grp['FV.Rate'].values       # percent
+
+    t_min, t_max = t.min(), t.max()
+
+    try:
+        curve = MonotoneConvexCurve(t, y)
+        row   = {'Fecha': date}
+
+        for τ in tenors:
+            col      = f'CMT_{int(τ)}y'
+            row[col] = (
+                round(curve.yield_at(τ), 4)
+                if t_min <= τ <= t_max
+                else np.nan
+            )
+        records.append(row)
+
+    except Exception as e:
+        skipped.append(date)
+
+df_cmt = pd.DataFrame(records).set_index('Fecha').sort_index()
+
+print(f"[CMT]  Built: {len(df_cmt):,} dates | "
+      f"Skipped: {len(skipped):,} dates (< {min_bonds} bonds or fit error)")
+return df_cmt
+```
+
+def build_forward_table(
+df_clean: pd.DataFrame,
+tenors: List[float] = CMT_TENORS,
+min_bonds: int      = MIN_BONDS,
+) -> pd.DataFrame:
+“””
+Build a daily table of instantaneous forward rates at CMT tenors.
+Used as input for roll-down analysis.
+
+```
+Returns
+-------
+df_fwd : DataFrame indexed by Fecha, columns Fwd_6y … Fwd_15y
+         Forward rates in PERCENT.
+"""
+df = df_clean.copy()
+records = []
+
+for date, grp in df.groupby('Fecha'):
+    grp = (grp.dropna(subset=['Maturity', 'FV.Rate'])
+              .sort_values('Maturity')
+              .drop_duplicates('Maturity'))
+
+    if len(grp) < min_bonds:
+        continue
+
+    t = grp['Maturity'].values
+    y = grp['FV.Rate'].values
+    t_min, t_max = t.min(), t.max()
+
+    try:
+        curve = MonotoneConvexCurve(t, y)
+        row   = {'Fecha': date}
+
+        for τ in tenors:
+            col      = f'Fwd_{int(τ)}y'
+            row[col] = (
+                round(curve.forward_at(τ), 4)
+                if t_min <= τ <= t_max
+                else np.nan
+            )
+        records.append(row)
+
+    except Exception:
+        continue
+
+df_fwd = pd.DataFrame(records).set_index('Fecha').sort_index()
+print(f"[FWD]  Built: {len(df_fwd):,} dates")
+return df_fwd
+```
+
+# ── Roll-down analysis ────────────────────────────────────────────────────────
+
+def build_roll_table(
+df_cmt: pd.DataFrame,
+horizons_months: List[int] = ROLL_HORIZONS,
+) -> pd.DataFrame:
+“””
+Compute carry + roll-down for each CMT tenor at each date.
+
+```
+For a par bond at CMT tenor τ held for Δt years:
+
+    Carry      = y(τ) × Δt                        [yield × time, in bps×yrs]
+    Roll-down  = y(τ) − y(τ − Δt)                 [yield change from rolling]
+    Total C+R  = Carry + Roll-down                 [total yield pickup in bps]
+    Approx DV01= τ / (1 + y(τ)/200)  × 0.01 / 100 [rough par bond DV01]
+    P&L est.   = Roll-down (bps) × DV01            [in price per 100 face]
+
+All yield values in bps (×100 from percent), DV01 in price per 100 face.
+
+Returns
+-------
+MultiIndex DataFrame: (Fecha, tenor) × (horizon metrics)
+"""
+tenors = [int(c.split('_')[1].replace('y','')) for c in df_cmt.columns]
+records = []
+
+for date, row in df_cmt.iterrows():
+    for τ in tenors:
+        y_tau = row.get(f'CMT_{τ}y', np.nan)
+        if np.isnan(y_tau):
+            continue
+
+        for h in horizons_months:
+            dt      = h / 12.0          # holding period in years
+            tau_fwd = τ - dt            # forward tenor after rolling
+
+            # Find the two CMT tenors that bracket tau_fwd for interpolation
+            # (simple linear interpolation on the already-built CMT grid)
+            y_fwd = _interpolate_cmt_row(row, tenors, tau_fwd)
+
+            if np.isnan(y_fwd):
+                continue
+
+            carry_bps     = y_tau * dt * 100          # bps
+            rolldown_bps  = (y_tau - y_fwd) * 100     # bps (positive = gains)
+            total_cr_bps  = carry_bps + rolldown_bps
+
+            # Approximate DV01 for a par bond (simplified)
+            dv01 = τ / (1 + y_tau / 200) * 0.01
+
+            records.append({
+                'Fecha'          : date,
+                'Tenor'          : f'{τ}y',
+                'Horizon_m'      : h,
+                'Yield_pct'      : round(y_tau, 4),
+                'Carry_bps'      : round(carry_bps, 2),
+                'RollDown_bps'   : round(rolldown_bps, 2),
+                'Total_CR_bps'   : round(total_cr_bps, 2),
+                'DV01_approx'    : round(dv01, 4),
+                'PnL_est'        : round(rolldown_bps * dv01, 4),
+            })
+
+df_roll = (pd.DataFrame(records)
+             .set_index(['Fecha', 'Tenor', 'Horizon_m'])
+             .sort_index())
+print(f"[ROLL] Built: {len(df_roll):,} tenor-horizon-date observations")
+return df_roll
+```
+
+def _interpolate_cmt_row(
+row: pd.Series, tenors: List[int], tau_target: float
+) -> float:
+“””
+Linear interpolation on the CMT grid for a single date row.
+Used only within build_roll_table to find y(τ - Δt).
+“””
+if tau_target <= 0:
+return np.nan
+
+```
+# Find bracketing tenors
+tenors_sorted = sorted(tenors)
+if tau_target < tenors_sorted[0] or tau_target > tenors_sorted[-1]:
+    return np.nan
+
+for i in range(len(tenors_sorted) - 1):
+    t_lo, t_hi = tenors_sorted[i], tenors_sorted[i+1]
+    if t_lo <= tau_target <= t_hi:
+        y_lo = row.get(f'CMT_{t_lo}y', np.nan)
+        y_hi = row.get(f'CMT_{t_hi}y', np.nan)
+        if np.isnan(y_lo) or np.isnan(y_hi):
+            return np.nan
+        w = (tau_target - t_lo) / (t_hi - t_lo)
+        return y_lo + w * (y_hi - y_lo)
+
+return np.nan
+```
+
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+
+def diagnostics(
+df_clean: pd.DataFrame,
+df_cmt: pd.DataFrame,
+sample_dates: int = 5,
+) -> pd.DataFrame:
+“””
+Compute per-bond fitting residuals: actual YTM minus curve-implied yield
+at each bond’s exact maturity.
+
+```
+A large residual flags a bond that is rich (-) or cheap (+) to the curve,
+or alternatively a data quality issue.
+
+Returns
+-------
+df_resid : DataFrame with columns [Fecha, Maturity, FV.Rate, Curve_Yield, Residual_bps]
+"""
+df = df_clean.copy()
+records = []
+
+for date, grp in df.groupby('Fecha'):
+    grp = (grp.dropna(subset=['Maturity', 'FV.Rate'])
+              .sort_values('Maturity')
+              .drop_duplicates('Maturity'))
+
+    if len(grp) < MIN_BONDS:
+        continue
+
+    t = grp['Maturity'].values
+    y = grp['FV.Rate'].values
+
+    try:
+        curve = MonotoneConvexCurve(t, y)
+        for _, bond in grp.iterrows():
+            tau    = bond['Maturity']
+            y_mkt  = bond['FV.Rate']
+            y_crv  = curve.yield_at(tau)
+            if y_crv is not None:
+                records.append({
+                    'Fecha'       : date,
+                    'Maturity'    : round(tau, 4),
+                    'FV.Rate'     : round(y_mkt, 4),
+                    'Curve_Yield' : round(y_crv, 4),
+                    'Residual_bps': round((y_mkt - y_crv) * 100, 2),
+                })
+    except Exception:
+        continue
+
+df_resid = pd.DataFrame(records)
+
+print("\n── Fitting Residuals (bps) ──────────────────────────────────────")
+print(df_resid['Residual_bps'].describe().round(3).to_string())
+print(f"\nMax absolute residual: "
+      f"{df_resid['Residual_bps'].abs().max():.2f} bps  "
+      f"(should be ~0 — MC interpolates exactly through nodes)")
+
+return df_resid
+```
+
+# ── Summary statistics ────────────────────────────────────────────────────────
+
+def cmt_summary(df_cmt: pd.DataFrame) -> pd.DataFrame:
+“””
+Descriptive statistics and average shape of the CMT curve.
+“””
+stats = df_cmt.describe().T
+stats.columns = [‘Count’,‘Mean’,‘Std’,‘Min’,‘P25’,‘Median’,‘P75’,‘Max’]
+stats = stats.round(4)
+print(”\n── CMT Curve Summary (percent) ──────────────────────────────────”)
+print(stats.to_string())
+return stats
+
+# ── Entry point (example usage) ───────────────────────────────────────────────
+
+if **name** == ‘**main**’:
+# ── Replace this block with your actual df_clean ──────────────────────
+# Example synthetic data — remove when using real data
+np.random.seed(42)
+dates     = pd.date_range(‘2018-01-02’, ‘2024-12-31’, freq=‘B’)
+bond_mats = [6.2, 7.8, 9.1, 10.5, 12.3, 14.8, 16.2]
+rows      = []
+base_yields = [6.8, 7.0, 7.2, 7.4, 7.55, 7.7, 7.8]
+for d in dates:
+shock = np.random.randn(len(bond_mats)) * 0.05
+level = np.random.randn() * 0.3
+for mat, by, sk in zip(bond_mats, base_yields, shock):
+rows.append({‘Fecha’: d, ‘Maturity’: mat, ‘FV.Rate’: by + level + sk})
+df_clean = pd.DataFrame(rows)
+# ── End synthetic data ─────────────────────────────────────────────────
+
+```
+print("Building CMT curve table...")
+df_cmt = build_cmt_table(df_clean, CMT_TENORS, MIN_BONDS)
+
+print("\nBuilding forward rate table...")
+df_fwd = build_forward_table(df_clean, CMT_TENORS, MIN_BONDS)
+
+print("\nBuilding roll-down table...")
+df_roll = build_roll_table(df_cmt, ROLL_HORIZONS)
+
+print("\nRunning diagnostics...")
+df_resid = diagnostics(df_clean, df_cmt)
+
+cmt_summary(df_cmt)
+
+# ── Quick inspection ───────────────────────────────────────────────────
+print("\n── Sample CMT yields (first 5 dates) ────────────────────────────")
+print(df_cmt.head().to_string())
+
+print("\n── Sample roll table (6m horizon, 10y tenor) ────────────────────")
+roll_10y_6m = (df_roll
+               .xs('10y', level='Tenor')
+               .xs(6, level='Horizon_m')
+               [['Yield_pct','Carry_bps','RollDown_bps','Total_CR_bps']])
+print(roll_10y_6m.head(10).to_string())
+```
