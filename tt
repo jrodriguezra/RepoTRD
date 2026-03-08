@@ -79,45 +79,20 @@ yields_bps = df * 100
 print(“Spread summary (bps):”)
 spreads.tail()
 
-# %% Cell 3 – Regime Classification Function
+# %% Cell 3 – Regime Classification (UPDATED: no Neutral, forward-fill)
 
 def classify_regime(df_yields_bps, short_tenor, long_tenor, lookback):
 “””
 Classify curve regime over a rolling lookback window.
-
-```
-Parameters
-----------
-df_yields_bps : DataFrame
-    Yield levels in bps, indexed by date.
-short_tenor : str
-    Short leg column name (e.g. 2Y).
-long_tenor : str
-    Long leg column name (e.g. 10Y).
-lookback : int
-    Number of business days for the rolling window.
-
-Returns
--------
-DataFrame with columns: short_chg, long_chg, spread_chg, regime
-
-Logic
------
-Over the lookback window, compute:
-    d_short = short_tenor[t] - short_tenor[t - lookback]
-    d_long  = long_tenor[t]  - long_tenor[t - lookback]
-    d_spread = d_long - d_short  (positive = steepening)
-
-Regime rules (practitioner standard):
-- Bull Steepener:   short falls, long falls, spread widens
-- Bear Steepener:   short rises, long rises, spread widens
-- Steepener Twist:  short falls, long rises, spread widens
-- Bull Flattener:   short falls, long falls, spread narrows
-- Bear Flattener:   short rises, long rises, spread narrows
-- Flattener Twist:  short rises, long falls, spread narrows
-"""
+No Neutral regime – edge cases forward-filled from prior day.
+“””
 result = pd.DataFrame(index=df_yields_bps.index)
 
+```
+# Spread level in bps (for plotting)
+result["spread_level"] = df_yields_bps[long_tenor] - df_yields_bps[short_tenor]
+
+# Changes over lookback window
 result["short_chg"]  = df_yields_bps[short_tenor].diff(lookback)
 result["long_chg"]   = df_yields_bps[long_tenor].diff(lookback)
 result["spread_chg"] = result["long_chg"] - result["short_chg"]
@@ -146,7 +121,14 @@ labels = [
     "Flattener Twist",
 ]
 
-result["regime"] = np.select(conditions, labels, default="Neutral")
+result["regime"] = np.select(conditions, labels, default=np.nan)
+
+# Forward-fill any NaN (edge case: both changes exactly 0)
+result["regime"] = result["regime"].replace("nan", np.nan)
+result["regime"] = result["regime"].ffill()
+
+# If the very first row is NaN, backfill it
+result["regime"] = result["regime"].bfill()
 
 return result
 ```
@@ -160,24 +142,22 @@ regimes = classify_regime(yields_bps, “2Y”, “10Y”, lookback=LOOKBACK)
 # Check regime distribution
 
 print(f”Regime classification (2s10s, lookback={LOOKBACK}d):\n”)
-print(regimes[“regime”].value_counts())
-print(f”\nNeutral count (spread_chg == exactly 0): {(regimes[‘regime’] == ‘Neutral’).sum()}”)
+counts = regimes[“regime”].value_counts()
+print(counts)
+print(f”\nTotal obs: {len(regimes)}”)
+print(f”Unique regimes: {regimes[‘regime’].nunique()}”)
 
-# %% Cell 4 – Regime Chart (matching GMM screenshot style)
+# %% Cell 4 – Regime Chart (UPDATED: y-axis = spread level)
 
 def plot_regime_chart(regimes_df, spread_name, weeks, lookback):
 “””
-Stacked bar chart of absolute spread changes colored by regime,
-with the spread curve overlaid.
+Bar chart where bar height = spread level in bps,
+bar color = regime, with spread level line overlaid.
 “””
-# Trim to the last N weeks of business days (~5 per week)
 n_days = weeks * 5
 plot_data = regimes_df.iloc[-n_days:].copy()
 
 ```
-# Absolute spread change for bar height
-plot_data["abs_spread_chg"] = plot_data["spread_chg"].abs()
-
 # Color map (matching GMM screenshot)
 regime_colors = {
     "Bull Steepener":   "#4A90D9",
@@ -186,36 +166,32 @@ regime_colors = {
     "Bull Flattener":   "#D0021B",
     "Bear Flattener":   "#9B59B6",
     "Flattener Twist":  "#8B6914",
-    "Neutral":          "#666666",
 }
 
 bar_colors = plot_data["regime"].map(regime_colors)
 
 # -- Figure --
 fig, ax = plt.subplots(figsize=(16, 6))
-
-# Dark background to match GMM style
 fig.patch.set_facecolor("#1a1a2e")
 ax.set_facecolor("#1a1a2e")
 
-# Bars
+# Bars: height = spread level
 ax.bar(
     plot_data.index,
-    plot_data["abs_spread_chg"],
+    plot_data["spread_level"],
     color=bar_colors,
     width=1.5,
     alpha=0.85,
     edgecolor="none",
 )
 
-# Spread level overlay
+# Line overlay: spread level
 ax.plot(
     plot_data.index,
-    plot_data["abs_spread_chg"],
+    plot_data["spread_level"],
     color="#F5A623",
     linewidth=1.2,
     alpha=0.9,
-    label=f"{spread_name} Curve",
 )
 
 # -- Styling --
@@ -231,7 +207,6 @@ ax.spines["left"].set_color("#333")
 ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
-# Grid
 ax.yaxis.grid(True, color="#333", linewidth=0.5, alpha=0.7)
 ax.set_axisbelow(True)
 
@@ -256,7 +231,6 @@ ax.legend(
     labelcolor="white",
 )
 
-# Date formatting on x-axis
 ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%b %y"))
 fig.autofmt_xdate(rotation=45)
 
@@ -271,10 +245,10 @@ return fig
 WEEKS = 52
 fig = plot_regime_chart(regimes, “2s10s”, weeks=WEEKS, lookback=LOOKBACK)
 
-# %% Cell 5 – Regime Summary Statistics
+# %% Cell 5 – Regime Summary Statistics (UPDATED: explicit display)
 
 def regime_summary(regimes_df, weeks=None):
-“”“Print regime frequency and average spread moves.”””
+“”“Regime frequency and average spread moves.”””
 data = regimes_df.copy()
 if weeks:
 data = data.iloc[-(weeks * 5):]
@@ -290,55 +264,20 @@ summary = data.groupby("regime").agg(
 summary["pct"] = (summary["count"] / summary["count"].sum() * 100).round(1)
 summary = summary.sort_values("count", ascending=False)
 
-print(f"Regime distribution (last {weeks}w):" if weeks else "Regime distribution (full sample):")
-print(summary.to_string())
 return summary
 ```
 
-_ = regime_summary(regimes, weeks=WEEKS)
+# – Display both full sample and windowed –
 
-# %% [markdown]
+print(”=” * 70)
+print(f”FULL SAMPLE regime distribution ({len(regimes)} observations)”)
+print(”=” * 70)
+full_stats = regime_summary(regimes)
+print(full_stats.to_string())
 
-# ## Regime Logic – Practitioner Rationale
-
-# 
-
-# The classification maps directly to how rates desks think about curve moves:
-
-# 
-
-# **Bull/Bear** refers to the bond market direction (bull = rally = yields falling).
-
-# This is determined by the sign of the yield changes on both legs.
-
-# 
-
-# **Steepener/Flattener** is the spread direction:
-
-# steepening = long end selling off relative to short end (spread widens).
-
-# 
-
-# **Twist** is the most violent regime – the two legs move in opposite directions.
-
-# This typically occurs at major policy pivots (e.g. Fed cutting while long end
-
-# sells off on inflation fears). In a 2-tenor framework, twists are unambiguous:
-
-# if short falls and long rises (or vice versa), it is a twist.
-
-# 
-
-# The lookback parameter controls the smoothing window. Practitioners typically use:
-
-# - 5d for tactical/weekly regime reads
-
-# - 20d (~1 month) for medium-term regime (your default, standard)
-
-# - 60d for strategic/quarterly regime
-
-# 
-
-# This is consistent with how MS, GS, and Barclays rates strategy
-
-# present curve regime analysis in their research.
+print()
+print(”=” * 70)
+print(f”LAST {WEEKS} WEEKS regime distribution”)
+print(”=” * 70)
+window_stats = regime_summary(regimes, weeks=WEEKS)
+print(window_stats.to_string())
