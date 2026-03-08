@@ -1,28 +1,131 @@
-# identify outlier dates per tenor
-# outlier defined as abs(diff) > mean + 3*std for each tenor
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-cols = [f'{tau}Y' for tau in CMT_TENORS]
-outlier_rows = []
+# ── PART 1: Interactive time series of MC minus Linear differences ─────────
 
-for col in cols:
-    col_data = df_diff[['Fecha', col]].dropna()
-    mean_v = col_data[col].mean()
-    std_v  = col_data[col].std()
-    cutoff = 3 * std_v
-    mask   = col_data[col].abs() > cutoff
-    flagged = col_data[mask].copy()
-    flagged['Tenor'] = col
-    flagged['Diff_bps'] = flagged[col]
-    outlier_rows.append(flagged[['Fecha', 'Tenor', 'Diff_bps']])
+# assumes df_diff is already built from compare_curves()
 
-df_outliers = pd.concat(outlier_rows).sort_values('Diff_bps', ascending=False)
-df_outliers['Year'] = pd.to_datetime(df_outliers['Fecha']).dt.year
+# df_diff has Fecha column and tenor columns 6Y..15Y in bps
 
-print('Outlier count by year:')
-print(df_outliers.groupby('Year').size().sort_values(ascending=False).to_string())
+def plot_differences_over_time(df_diff, tenors=CMT_TENORS):
+cols = [f’{tau}Y’ for tau in tenors]
+df = df_diff.copy()
+df[‘Fecha’] = pd.to_datetime(df[‘Fecha’])
 
-print('\nOutlier count by year and tenor:')
-print(df_outliers.groupby(['Year', 'Tenor']).size().unstack(fill_value=0).to_string())
+```
+fig = go.Figure()
 
-print('\nLargest outliers (top 20):')
-print(df_outliers.head(20)[['Fecha', 'Tenor', 'Diff_bps']].to_string())
+colors = [
+    '#e6194b', '#3cb44b', '#4363d8', '#f58231',
+    '#911eb4', '#42d4f4', '#f032e6', '#bfef45',
+    '#fabed4', '#469990'
+]
+
+for col, color in zip(cols, colors):
+    data = df[['Fecha', col]].dropna()
+    fig.add_trace(
+        go.Scatter(
+            x=data['Fecha'],
+            y=data[col],
+            mode='lines',
+            name=col,
+            line=dict(width=1.2, color=color),
+            hovertemplate=(
+                '<b>' + col + '</b><br>'
+                + 'Fecha: %{x|%Y-%m-%d}<br>'
+                + 'Diff: %{y:.2f} bps<extra></extra>'
+            )
+        )
+    )
+
+fig.add_hline(y=0, line_dash='dash', line_color='black', line_width=0.8)
+
+fig.update_layout(
+    title=dict(text='MC minus Linear Interpolation — Difference by CMT Node (bps)', font=dict(size=14)),
+    xaxis=dict(title='Fecha', showgrid=True, gridcolor='lightgrey'),
+    yaxis=dict(title='Difference (bps)', showgrid=True, gridcolor='lightgrey'),
+    hovermode='x unified',
+    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+    plot_bgcolor='white',
+    width=1100,
+    height=500
+)
+
+fig.show()
+return fig
+```
+
+# ── PART 2: Stability validation ──────────────────────────────────────────
+
+# Compares day-over-day smoothness of MC vs Linear across all tenor nodes
+
+# Metric: first difference of yields (daily change in bps)
+
+# A better curve should have lower variance in daily changes
+
+# and fewer large single-day jumps (which are artifacts, not markets)
+
+def validate_stability(df_cmt, df_interpol, tenors=CMT_TENORS):
+cols = [f’{tau}Y’ for tau in tenors]
+
+```
+mc = df_cmt.copy().sort_values('Fecha').set_index('Fecha')[cols]
+li = df_interpol.copy().sort_values('Fecha').set_index('Fecha')[cols]
+
+# daily changes in bps
+mc_diff = mc.diff() * 100
+li_diff = li.diff() * 100
+
+# ── metric 1: std of daily changes (lower = smoother = better)
+mc_std = mc_diff.std().rename('MC_DailyStd')
+li_std = li_diff.std().rename('LI_DailyStd')
+
+# ── metric 2: count of large jumps > 10bps in a single day (artifacts)
+mc_jumps = (mc_diff.abs() > 10).sum().rename('MC_Jumps>10bps')
+li_jumps = (li_diff.abs() > 10).sum().rename('LI_Jumps>10bps')
+
+# ── metric 3: 95th percentile of abs daily change
+mc_p95 = mc_diff.abs().quantile(0.95).rename('MC_P95_abs')
+li_p95 = li_diff.abs().quantile(0.95).rename('LI_P95_abs')
+
+stability = pd.concat([mc_std, li_std, mc_jumps, li_jumps, mc_p95, li_p95], axis=1)
+stability['StdRatio_MC_LI'] = (stability['MC_DailyStd'] / stability['LI_DailyStd']).round(3)
+stability = stability.round(3)
+
+print('\n── Stability Validation: MC vs Linear Interpolation ─────────────────')
+print('StdRatio < 1 means MC is smoother than Linear on that node')
+print(stability.to_string())
+
+# ── plot: distribution of daily changes side by side
+fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharey=False)
+axes = axes.flatten()
+
+for idx, col in enumerate(cols):
+    ax = axes[idx]
+    mc_s = mc_diff[col].dropna()
+    li_s = li_diff[col].dropna()
+    ax.hist(li_s, bins=60, alpha=0.5, color='steelblue', label='Linear', density=True)
+    ax.hist(mc_s, bins=60, alpha=0.5, color='tomato', label='MC', density=True)
+    ax.set_title(col, fontsize=10)
+    ax.set_xlabel('Daily change (bps)', fontsize=8)
+    ax.axvline(0, color='black', linewidth=0.7, linestyle='--')
+    ax.tick_params(labelsize=7)
+    if idx == 0:
+        ax.legend(fontsize=8)
+
+fig.suptitle('Distribution of Daily Yield Changes — MC vs Linear (bps)', fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.savefig('stability_validation.png', dpi=150)
+plt.show()
+print('Stability chart saved.')
+
+return stability
+```
+
+# ── run both
+
+fig_diff = plot_differences_over_time(df_diff)
+stability = validate_stability(df_cmt, df_interpol)
