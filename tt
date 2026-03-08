@@ -5,10 +5,11 @@
 import pathlib
 p = pathlib.Path(r"R:/RScripts/PCA Tools Frodo/PCA Tools Frodo/ust_curve_regime_model.py")
 t = p.read_text(encoding="utf-8")
-for bad, good in [("\u201c",'"'),("\u201d",'"'),("\u2018","'"),("\u2019","'")]:
-    t = t.replace(bad, good)
+for code in [8216, 8217, 8218, 8219, 8220, 8221]:
+    t = t.replace(chr(code), chr(34) if code > 8219 else chr(39))
 p.write_text(t, encoding="utf-8")
 print("Cleaned")
+
 
 # # UST Curve Regime Model
 
