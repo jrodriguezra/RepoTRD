@@ -1,3 +1,5 @@
+
+
 # %% [markdown]
 
 # CELL 0 -- paste this first, fix any curly quotes by hand (only 6 quotes to check)
@@ -78,6 +80,14 @@ yields_bps = df * 100
 
 print(“Spread summary (bps):”)
 spreads.tail()
+
+
+# %% Cell 2.5 -- Parameters (edit these)
+LOOKBACK = 20    # business days for regime detection
+WEEKS = 52       # weeks of data to display in chart
+
+
+
 
 # %% Cell 3 – Regime Classification (UPDATED: no Neutral, forward-fill)
 
