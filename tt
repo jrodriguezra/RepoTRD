@@ -157,103 +157,97 @@ print(counts)
 print(f”\nTotal obs: {len(regimes)}”)
 print(f”Unique regimes: {regimes[‘regime’].nunique()}”)
 
-# %% Cell 4 – Regime Chart (UPDATED: y-axis = spread level)
-
+# %% Cell 4 -- Regime Chart (FIXED: no weekend gaps)
 def plot_regime_chart(regimes_df, spread_name, weeks, lookback):
-“””
-Bar chart where bar height = spread level in bps,
-bar color = regime, with spread level line overlaid.
-“””
-n_days = weeks * 5
-plot_data = regimes_df.iloc[-n_days:].copy()
+    n_days = weeks * 5
+    plot_data = regimes_df.iloc[-n_days:].copy()
+    plot_data = plot_data.reset_index()
 
-```
-# Color map (matching GMM screenshot)
-regime_colors = {
-    "Bull Steepener":   "#4A90D9",
-    "Bear Steepener":   "#F5A623",
-    "Steepener Twist":  "#7ED321",
-    "Bull Flattener":   "#D0021B",
-    "Bear Flattener":   "#9B59B6",
-    "Flattener Twist":  "#8B6914",
-}
+    regime_colors = {
+        "Bull Steepener":   "#4A90D9",
+        "Bear Steepener":   "#F5A623",
+        "Steepener Twist":  "#7ED321",
+        "Bull Flattener":   "#D0021B",
+        "Bear Flattener":   "#9B59B6",
+        "Flattener Twist":  "#8B6914",
+    }
 
-bar_colors = plot_data["regime"].map(regime_colors)
+    bar_colors = plot_data["regime"].map(regime_colors)
 
-# -- Figure --
-fig, ax = plt.subplots(figsize=(16, 6))
-fig.patch.set_facecolor("#1a1a2e")
-ax.set_facecolor("#1a1a2e")
+    fig, ax = plt.subplots(figsize=(16, 6))
+    fig.patch.set_facecolor("#1a1a2e")
+    ax.set_facecolor("#1a1a2e")
 
-# Bars: height = spread level
-ax.bar(
-    plot_data.index,
-    plot_data["spread_level"],
-    color=bar_colors,
-    width=1.5,
-    alpha=0.85,
-    edgecolor="none",
-)
+    # Plot against integer index, not dates
+    x = np.arange(len(plot_data))
 
-# Line overlay: spread level
-ax.plot(
-    plot_data.index,
-    plot_data["spread_level"],
-    color="#F5A623",
-    linewidth=1.2,
-    alpha=0.9,
-)
+    ax.bar(
+        x,
+        plot_data["spread_level"],
+        color=bar_colors,
+        width=1.0,
+        alpha=0.85,
+        edgecolor="none",
+    )
 
-# -- Styling --
-ax.set_title(
-    f"{spread_name}   (Lookback: {lookback}d  |  Display: {weeks}w)",
-    color="white", fontsize=14, fontweight="bold", pad=12,
-)
-ax.set_ylabel("bps", color="white", fontsize=11)
+    ax.plot(
+        x,
+        plot_data["spread_level"],
+        color="#F5A623",
+        linewidth=1.2,
+        alpha=0.9,
+    )
 
-ax.tick_params(colors="white", labelsize=9)
-ax.spines["bottom"].set_color("#333")
-ax.spines["left"].set_color("#333")
-ax.spines["top"].set_visible(False)
-ax.spines["right"].set_visible(False)
+    # X-axis: show ~12 date labels evenly spaced
+    n_ticks = min(12, len(plot_data))
+    tick_idx = np.linspace(0, len(plot_data) - 1, n_ticks, dtype=int)
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels(
+        [plot_data["Fecha"].iloc[i].strftime("%b %y") for i in tick_idx],
+        rotation=45,
+        ha="right",
+    )
 
-ax.yaxis.grid(True, color="#333", linewidth=0.5, alpha=0.7)
-ax.set_axisbelow(True)
+    ax.set_title(
+        f"{spread_name}   (Lookback: {lookback}d  |  Display: {weeks}w)",
+        color="white", fontsize=14, fontweight="bold", pad=12,
+    )
+    ax.set_ylabel("bps", color="white", fontsize=11)
 
-# -- Legend --
-from matplotlib.patches import Patch
-legend_order = [
-    "Bull Steepener", "Bear Steepener", "Steepener Twist",
-    "Bull Flattener", "Bear Flattener", "Flattener Twist",
-]
-legend_elements = [
-    Patch(facecolor=regime_colors[r], label=r) for r in legend_order
-]
-legend_elements.append(
-    plt.Line2D([0], [0], color="#F5A623", linewidth=1.5, label=f"{spread_name} Curve")
-)
-ax.legend(
-    handles=legend_elements,
-    loc="upper right",
-    fontsize=9,
-    facecolor="#1a1a2e",
-    edgecolor="#444",
-    labelcolor="white",
-)
+    ax.tick_params(colors="white", labelsize=9)
+    ax.spines["bottom"].set_color("#333")
+    ax.spines["left"].set_color("#333")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
-ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%b %y"))
-fig.autofmt_xdate(rotation=45)
+    ax.yaxis.grid(True, color="#333", linewidth=0.5, alpha=0.7)
+    ax.set_axisbelow(True)
 
-plt.tight_layout()
-plt.show()
+    from matplotlib.patches import Patch
+    legend_order = [
+        "Bull Steepener", "Bear Steepener", "Steepener Twist",
+        "Bull Flattener", "Bear Flattener", "Flattener Twist",
+    ]
+    legend_elements = [
+        Patch(facecolor=regime_colors[r], label=r) for r in legend_order
+    ]
+    legend_elements.append(
+        plt.Line2D([0], [0], color="#F5A623", linewidth=1.5, label=f"{spread_name} Curve")
+    )
+    ax.legend(
+        handles=legend_elements,
+        loc="upper right",
+        fontsize=9,
+        facecolor="#1a1a2e",
+        edgecolor="#444",
+        labelcolor="white",
+    )
 
-return fig
-```
+    plt.tight_layout()
+    plt.show()
+    return fig
 
-# – Plot: 2s10s, 52 weeks, lookback 20 –
-
-WEEKS = 52
-fig = plot_regime_chart(regimes, “2s10s”, weeks=WEEKS, lookback=LOOKBACK)
+fig = plot_regime_chart(regimes, "2s10s", weeks=WEEKS, lookback=LOOKBACK)
 
 # %% Cell 5 – Regime Summary Statistics (UPDATED: explicit display)
 
