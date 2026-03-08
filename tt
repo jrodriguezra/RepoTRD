@@ -6,24 +6,23 @@ CMT_TENORS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 MIN_BONDS  = 3
 
 class MonotoneConvexCurve:
+def **init**(self, maturities, yields_pct):
+idx         = np.argsort(maturities)
+self.t      = np.asarray(maturities, dtype=float)[idx]
+self.y      = np.asarray(yields_pct, dtype=float)[idx] / 100.0
+self.n      = len(self.t)
+self.Q      = self.y * self.t
+self.f_disc = np.diff(self.Q) / np.diff(self.t)
+self.f_node = self._node_forwards()
 
 ```
-def __init__(self, maturities, yields_pct):
-    idx         = np.argsort(maturities)
-    self.t      = np.asarray(maturities, dtype=float)[idx]
-    self.y      = np.asarray(yields_pct, dtype=float)[idx] / 100.0
-    self.n      = len(self.t)
-    self.Q      = self.y * self.t
-    self.f_disc = np.diff(self.Q) / np.diff(self.t)
-    self.f_node = self._node_forwards()
-
 def _node_forwards(self):
     t  = self.t
     fd = self.f_disc
     n  = self.n
     f  = np.zeros(n)
     for i in range(1, n - 1):
-        h_l  = t[i]   - t[i - 1]
+        h_l  = t[i] - t[i - 1]
         h_r  = t[i + 1] - t[i]
         f[i] = (fd[i - 1] * h_r + fd[i] * h_l) / (h_l + h_r)
     f[0]  = fd[0]  - 0.5 * (f[1]  - fd[0])
@@ -43,15 +42,15 @@ def _correct_fwd(self, f0, fd, f1):
         f0 * (1 - 4 * etas + 3 * etas**2)
         + f1 * etas * (-2 + 3 * etas)
     )
-    w    = 6 * etas * (1 - etas)
-    mask = w > 1e-12
+    w      = 6 * etas * (1 - etas)
+    mask   = w > 1e-12
     fd_new = max(fd, np.max(-g[mask] / w[mask]) + 1e-8)
     return max(f0, 1e-6), fd_new, max(f1, 1e-6)
 
 def _segment(self, t_query):
     if t_query < self.t[0] or t_query > self.t[-1]:
         return None
-    i = int(np.searchsorted(self.t, t_query, side="right")) - 1
+    i = int(np.searchsorted(self.t, t_query, side='right')) - 1
     return int(np.clip(i, 0, self.n - 2))
 
 def yield_at(self, t_query):
@@ -81,24 +80,24 @@ def yield_at(self, t_query):
 def build_cmt(df_clean, tenors=CMT_TENORS, min_bonds=MIN_BONDS):
 records = []
 skipped = 0
-for date, grp in df_clean.groupby(“Fecha”):
+for date, grp in df_clean.groupby(‘Fecha’):
 grp = (
-grp.dropna(subset=[“Maturity”, “FV.Rate”])
-.sort_values(“Maturity”)
-.drop_duplicates(“Maturity”)
+grp.dropna(subset=[‘Maturity’, ‘FV.Rate’])
+.sort_values(‘Maturity’)
+.drop_duplicates(‘Maturity’)
 )
 if len(grp) < min_bonds:
 skipped += 1
 continue
-t     = grp[“Maturity”].values
-y     = grp[“FV.Rate”].values
+t     = grp[‘Maturity’].values
+y     = grp[‘FV.Rate’].values
 t_min = t.min()
 t_max = t.max()
 try:
 curve = MonotoneConvexCurve(t, y)
-row   = {“Fecha”: date}
+row   = {‘Fecha’: date}
 for tau in tenors:
-col      = f”{tau}Y”
+col      = f’{tau}Y’
 row[col] = (
 round(curve.yield_at(tau), 4)
 if t_min <= tau <= t_max
@@ -109,66 +108,54 @@ except Exception:
 skipped += 1
 df_cmt = (
 pd.DataFrame(records)
-.set_index(“Fecha”)
+.set_index(‘Fecha’)
 .sort_index()
 )
-df_cmt.index.name = “Fecha”
-print(f”CMT built: {len(df_cmt):,} dates | skipped: {skipped:,}”)
+df_cmt.index.name = ‘Fecha’
+print(f’CMT built: {len(df_cmt):,} dates | skipped: {skipped:,}’)
 return df_cmt
 
 def compare_curves(df_cmt, df_interpol, tenors=CMT_TENORS):
-cols = [f”{tau}Y” for tau in tenors]
-
-```
-if "Fecha" in df_interpol.columns:
-    df_li = df_interpol.set_index("Fecha")[cols].copy()
+cols = [f’{tau}Y’ for tau in tenors]
+if ‘Fecha’ in df_interpol.columns:
+df_li = df_interpol.set_index(‘Fecha’)[cols].copy()
 else:
-    df_li = df_interpol[cols].copy()
-
+df_li = df_interpol[cols].copy()
 df_mc  = df_cmt[cols].copy()
 shared = df_mc.index.intersection(df_li.index)
 df_mc  = df_mc.loc[shared]
 df_li  = df_li.loc[shared]
-
 df_diff = (df_mc - df_li) * 100
-
-stats         = df_diff.describe().T[["mean", "std", "min", "25%", "50%", "75%", "max"]]
-stats.columns = ["Mean", "Std", "Min", "P25", "Median", "P75", "Max"]
+stats         = df_diff.describe().T[[‘mean’, ‘std’, ‘min’, ‘25%’, ‘50%’, ‘75%’, ‘max’]]
+stats.columns = [‘Mean’, ‘Std’, ‘Min’, ‘P25’, ‘Median’, ‘P75’, ‘Max’]
 stats         = stats.round(3)
-print("\nDifference MC minus Linear Interpolation (bps)")
+print(’\nDifference MC minus Linear Interpolation (bps)’)
 print(stats.to_string())
-
 fig, ax   = plt.subplots(figsize=(13, 5))
 data_plot = [df_diff[c].dropna().values for c in cols]
 bp = ax.boxplot(
-    data_plot,
-    tick_labels=cols,
-    patch_artist=True,
-    medianprops=dict(color="black", linewidth=1.8),
-    flierprops=dict(marker="o", markersize=2, alpha=0.3, color="grey"),
-    whiskerprops=dict(linewidth=1.2),
-    capprops=dict(linewidth=1.2)
+data_plot,
+tick_labels=cols,
+patch_artist=True,
+medianprops=dict(color=‘black’, linewidth=1.8),
+flierprops=dict(marker=‘o’, markersize=2, alpha=0.3, color=‘grey’),
+whiskerprops=dict(linewidth=1.2),
+capprops=dict(linewidth=1.2)
 )
 colors = plt.cm.RdYlBu(np.linspace(0.1, 0.9, len(cols)))
-for patch, color in zip(bp["boxes"], colors):
-    patch.set_facecolor(color)
-    patch.set_alpha(0.75)
-ax.axhline(0, color="black", linewidth=1.0, linestyle="--", alpha=0.7)
-ax.set_title(
-    "Monotone Convex vs Linear Interpolation — Difference by CMT Node (bps)",
-    fontsize=12,
-    fontweight="bold"
-)
-ax.set_xlabel("CMT Tenor", fontsize=10)
-ax.set_ylabel("MC minus Linear (bps)", fontsize=10)
-ax.grid(axis="y", linestyle=":", alpha=0.5)
+for patch, color in zip(bp[‘boxes’], colors):
+patch.set_facecolor(color)
+patch.set_alpha(0.75)
+ax.axhline(0, color=‘black’, linewidth=1.0, linestyle=’–’, alpha=0.7)
+ax.set_title(‘Monotone Convex vs Linear Interpolation — Difference by CMT Node (bps)’, fontsize=12, fontweight=‘bold’)
+ax.set_xlabel(‘CMT Tenor’, fontsize=10)
+ax.set_ylabel(‘MC minus Linear (bps)’, fontsize=10)
+ax.grid(axis=‘y’, linestyle=’:’, alpha=0.5)
 plt.tight_layout()
-plt.savefig("/mnt/user-data/outputs/cmt_comparison.png", dpi=150)
+plt.savefig(’/mnt/user-data/outputs/cmt_comparison.png’, dpi=150)
 plt.show()
-print("Boxplot saved.")
-
+print(‘Boxplot saved.’)
 return df_diff, stats
-```
 
 # plug in your actual df_clean and df_interpol below
 
