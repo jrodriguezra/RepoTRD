@@ -1,4 +1,4 @@
-
+#
 
 # %% [markdown]
 
@@ -285,3 +285,272 @@ print(f”LAST {WEEKS} WEEKS regime distribution”)
 print(”=” * 70)
 window_stats = regime_summary(regimes, weeks=WEEKS)
 print(window_stats.to_string())
+
+
+
+# %% Cell 6 -- Interactive Plotly Widget
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import plotly.graph_objects as go
+
+# Spread selector options
+spread_options = {
+    "2s5s":   ("2Y", "5Y"),
+    "2s10s":  ("2Y", "10Y"),
+    "2s30s":  ("2Y", "30Y"),
+    "5s10s":  ("5Y", "10Y"),
+    "5s30s":  ("5Y", "30Y"),
+    "10s30s": ("10Y", "30Y"),
+}
+
+def compute_streak_days(regimes_series):
+    """For each row, how many consecutive days this regime has been active."""
+    streaks = []
+    count = 1
+    prev = regimes_series.iloc[0]
+    streaks.append(count)
+    for i in range(1, len(regimes_series)):
+        if regimes_series.iloc[i] == prev:
+            count += 1
+        else:
+            count = 1
+            prev = regimes_series.iloc[i]
+        streaks.append(count)
+    return streaks
+
+def compute_avg_durations(regimes_series):
+    """Average streak length per regime over the full series."""
+    streaks = []
+    current_regime = regimes_series.iloc[0]
+    current_len = 1
+    for i in range(1, len(regimes_series)):
+        if regimes_series.iloc[i] == current_regime:
+            current_len += 1
+        else:
+            streaks.append((current_regime, current_len))
+            current_regime = regimes_series.iloc[i]
+            current_len = 1
+    streaks.append((current_regime, current_len))
+
+    streak_df = pd.DataFrame(streaks, columns=["regime", "duration"])
+    avg_dur = streak_df.groupby("regime")["duration"].mean()
+    return avg_dur
+
+def build_chart(spread_name, lookback, weeks, avg_window_years):
+    short_t, long_t = spread_options[spread_name]
+    reg = classify_regime(yields_bps, short_t, long_t, lookback)
+
+    # Determine avg duration window
+    if avg_window_years == "Max":
+        reg_for_avg = reg.copy()
+    else:
+        n_days_avg = int(float(avg_window_years) * 252)
+        reg_for_avg = reg.iloc[-n_days_avg:]
+
+    avg_dur = compute_avg_durations(reg_for_avg["regime"])
+
+    # Trim to display window
+    n_days = weeks * 5
+    plot_data = reg.iloc[-n_days:].copy()
+    plot_data = plot_data.reset_index()
+
+    # Compute streaks on display window (but need context from before)
+    # Recompute on full series then trim
+    full_streaks = compute_streak_days(reg["regime"])
+    reg["streak_days"] = full_streaks
+    plot_data = reg.iloc[-n_days:].copy()
+    plot_data = plot_data.reset_index()
+
+    # Distance to average
+    plot_data["avg_duration"] = plot_data["regime"].map(avg_dur).round(1)
+    plot_data["dist_to_avg"] = (
+        plot_data["streak_days"] - plot_data["avg_duration"]
+    ).round(1)
+
+    # Colors
+    regime_colors = {
+        "Bull Steepener":   "#4A90D9",
+        "Bear Steepener":   "#F5A623",
+        "Steepener Twist":  "#7ED321",
+        "Bull Flattener":   "#D0021B",
+        "Bear Flattener":   "#9B59B6",
+        "Flattener Twist":  "#8B6914",
+    }
+
+    bar_colors = plot_data["regime"].map(regime_colors).tolist()
+
+    # Hover text
+    hover_text = []
+    for _, row in plot_data.iterrows():
+        txt = (
+            f"Date: {row['Fecha'].strftime('%d %b %Y')}<br>"
+            f"Spread: {row['spread_level']:.1f} bps<br>"
+            f"Regime: {row['regime']}<br>"
+            f"Days in regime: {int(row['streak_days'])}<br>"
+            f"Avg duration: {row['avg_duration']:.1f}d<br>"
+            f"Dist to avg: {row['dist_to_avg']:+.1f}d"
+        )
+        hover_text.append(txt)
+
+    # Build Plotly figure
+    fig = go.Figure()
+
+    # Bars
+    fig.add_trace(go.Bar(
+        x=plot_data["Fecha"],
+        y=plot_data["spread_level"],
+        marker_color=bar_colors,
+        hovertext=hover_text,
+        hoverinfo="text",
+        name="Spread Level",
+        showlegend=False,
+    ))
+
+    # Line overlay
+    fig.add_trace(go.Scatter(
+        x=plot_data["Fecha"],
+        y=plot_data["spread_level"],
+        mode="lines",
+        line=dict(color="#F5A623", width=1.5),
+        hoverinfo="skip",
+        name=f"{spread_name} Curve",
+        showlegend=True,
+    ))
+
+    # Invisible traces for legend color boxes
+    for regime_name in [
+        "Bull Steepener", "Bear Steepener", "Steepener Twist",
+        "Bull Flattener", "Bear Flattener", "Flattener Twist",
+    ]:
+        fig.add_trace(go.Bar(
+            x=[None], y=[None],
+            marker_color=regime_colors[regime_name],
+            name=regime_name,
+            showlegend=True,
+        ))
+
+    window_label = (
+        f"Max (1990)" if avg_window_years == "Max"
+        else f"{avg_window_years}y"
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"{spread_name}   "
+                f"(Lookback: {lookback}d  |  "
+                f"Display: {weeks}w  |  "
+                f"Avg Window: {window_label})"
+            ),
+            font=dict(color="white", size=14),
+        ),
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#1a1a2e",
+        font=dict(color="white"),
+        yaxis=dict(
+            title="bps",
+            gridcolor="#333",
+            gridwidth=0.5,
+        ),
+        xaxis=dict(
+            gridcolor="#333",
+            gridwidth=0.5,
+            rangeslider=dict(visible=False),
+        ),
+        legend=dict(
+            bgcolor="rgba(26,26,46,0.9)",
+            bordercolor="#444",
+            borderwidth=1,
+            font=dict(size=10),
+        ),
+        dragmode="zoom",
+        height=500,
+        bargap=0,
+    )
+
+    fig.show()
+
+    # Print stats
+    print()
+    print("=" * 60)
+    print(f"REGIME STATS (last {weeks}w)")
+    print("=" * 60)
+    stats = regime_summary(plot_data, weeks=None)
+    print(stats.to_string())
+
+# -- Widgets --
+w_spread = widgets.Dropdown(
+    options=list(spread_options.keys()),
+    value="2s10s",
+    description="Spread:",
+    style={"description_width": "80px"},
+)
+
+w_lookback = widgets.Text(
+    value="20",
+    description="Lookback (d):",
+    style={"description_width": "100px"},
+    layout=widgets.Layout(width="200px"),
+)
+
+w_weeks = widgets.Text(
+    value="52",
+    description="Display (w):",
+    style={"description_width": "100px"},
+    layout=widgets.Layout(width="200px"),
+)
+
+w_avg = widgets.Text(
+    value="3",
+    description="Avg Window (y):",
+    style={"description_width": "110px"},
+    layout=widgets.Layout(width="220px"),
+)
+
+w_button = widgets.Button(
+    description="Update",
+    button_style="info",
+    layout=widgets.Layout(width="100px"),
+)
+
+output = widgets.Output()
+
+def on_click(_):
+    # Validate lookback
+    try:
+        lb = int(w_lookback.value)
+        lb = max(5, min(180, lb))
+    except ValueError:
+        lb = 20
+
+    # Validate weeks
+    try:
+        wk = int(w_weeks.value)
+        wk = max(1, min(52, wk))
+    except ValueError:
+        wk = 52
+
+    # Validate avg window
+    avg_val = w_avg.value.strip().lower()
+    if avg_val == "max":
+        avg_w = "Max"
+    else:
+        try:
+            avg_w = float(avg_val)
+            avg_w = max(0.25, avg_w)
+            avg_w = str(avg_w)
+        except ValueError:
+            avg_w = "3"
+
+    with output:
+        clear_output(wait=True)
+        build_chart(w_spread.value, lb, wk, avg_w)
+
+w_button.on_click(on_click)
+
+row1 = widgets.HBox([w_spread, w_lookback, w_weeks, w_avg, w_button])
+display(row1)
+display(output)
+
+# Initial render
+on_click(None)
