@@ -1,56 +1,349 @@
+# %% [markdown]
+
+# # UST Curve Regime Model
+
+# Classifies daily curve moves into 6 regimes based on realized changes
+
+# in 2-tenor spreads over a rolling lookback window.
+
+# 
+
+# **Regimes:**
+
+# - Bull Steepener / Bear Steepener
+
+# - Bull Flattener / Bear Flattener
+
+# - Steepener Twist / Flattener Twist
+
+# %% Cell 1 — Imports & Data Loading
+
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 
-CMT_TENORS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-cols = [f”{tau}Y” for tau in CMT_TENORS]
-valid_cols = [c for c in cols if c in df_diff.columns and df_diff[c].notna().sum() > 0]
+# ── Load data ──
 
-df = df_diff.copy()
-df[“Fecha”] = pd.to_datetime(df[“Fecha”])
-df[“Year”] = df[“Fecha”].dt.year
+PATH = r”R:/RScripts/PCA Tools Frodo/PCA Tools Frodo/USTs90s26s.csv”
 
-threshold = 15
+df = pd.read_csv(PATH)
 
-# count per tenor
+# Parse dates: Fecha is string mm/dd/yyyy
 
-print(“Obs with diff > 15 bps per tenor”)
-print(”=” * 50)
-summary_rows = []
-for col in valid_cols:
-total = df[col].notna().sum()
-above = (df[col] > threshold).sum()
-pct = round(100 * above / total, 2) if total > 0 else 0
-summary_rows.append({“Tenor”: col, “Total_obs”: total, “Above_15bps”: above, “Pct”: pct})
+df[‘Fecha’] = pd.to_datetime(df[‘Fecha’], format=’%m/%d/%Y’)
+df = df.sort_values(‘Fecha’).reset_index(drop=True)
+df = df.set_index(‘Fecha’)
 
-df_summary = pd.DataFrame(summary_rows).set_index(“Tenor”)
-print(df_summary.to_string())
+# Rename columns to strip any whitespace
 
-# count per tenor per year
+df.columns = df.columns.str.strip()
 
-print(”\nObs with diff > 15 bps per tenor per year”)
-print(”=” * 50)
-year_rows = []
-for col in valid_cols:
-for year, grp in df.groupby(“Year”):
-total = grp[col].notna().sum()
-above = (grp[col] > threshold).sum()
-pct = round(100 * above / total, 2) if total > 0 else 0
-year_rows.append({“Tenor”: col, “Year”: year, “Total_obs”: total, “Above_15bps”: above, “Pct”: pct})
+# Quick sanity check
 
-df_by_year = (
-pd.DataFrame(year_rows)
-.pivot_table(index=“Year”, columns=“Tenor”, values=“Above_15bps”, aggfunc=“sum”)
-[valid_cols]
+print(f”Date range: {df.index.min().date()} → {df.index.max().date()}”)
+print(f”Shape: {df.shape}”)
+print(f”Columns: {list(df.columns)}”)
+df.head()
+
+# %% Cell 2 — Compute Spreads
+
+# ── All standard curve spreads (in bps, assuming yields are in %) ──
+
+# If your yields are already in bps, remove the * 100
+
+spreads = pd.DataFrame(index=df.index)
+
+# Standard market-monitored spreads
+
+spreads[‘2s5s’]  = (df[‘5Y’]  - df[‘2Y’])  * 100   # in bps
+spreads[‘2s10s’] = (df[‘10Y’] - df[‘2Y’])  * 100
+spreads[‘2s30s’] = (df[‘30Y’] - df[‘2Y’])  * 100
+spreads[‘5s10s’] = (df[‘10Y’] - df[‘5Y’])  * 100
+spreads[‘5s30s’] = (df[‘30Y’] - df[‘5Y’])  * 100
+spreads[‘10s30s’]= (df[‘30Y’] - df[‘10Y’]) * 100
+
+# Store yields in bps too for regime logic
+
+yields_bps = df * 100  # convert % to bps; adjust if already bps
+
+print(“Spread summary (bps):”)
+spreads.tail()
+
+# %% Cell 3 — Regime Classification Function
+
+def classify_regime(df_yields_bps, short_tenor, long_tenor, lookback):
+“””
+Classify curve regime over a rolling lookback window.
+
+```
+Parameters
+----------
+df_yields_bps : DataFrame
+    Yield levels in bps, indexed by date.
+short_tenor : str
+    Short leg column name (e.g., '2Y').
+long_tenor : str
+    Long leg column name (e.g., '10Y').
+lookback : int
+    Number of business days for the rolling window.
+
+Returns
+-------
+DataFrame with columns: short_chg, long_chg, spread_chg, regime
+
+Logic
+-----
+Over the lookback window, compute:
+    Δ_short = short_tenor[t] - short_tenor[t - lookback]
+    Δ_long  = long_tenor[t]  - long_tenor[t - lookback]
+    Δ_spread = Δ_long - Δ_short  (positive = steepening)
+
+Regime rules (practitioner standard):
+┌─────────────────────┬────────────┬────────────┬──────────────┐
+│ Regime              │ Δ_short    │ Δ_long     │ Δ_spread     │
+├─────────────────────┼────────────┼────────────┼──────────────┤
+│ Bull Steepener      │ < 0        │ < 0        │ > 0 (steep)  │
+│ Bear Steepener      │ > 0        │ > 0        │ > 0 (steep)  │
+│ Steepener Twist     │ < 0        │ > 0        │ > 0 (steep)  │
+│ Bull Flattener      │ < 0        │ < 0        │ < 0 (flat)   │
+│ Bear Flattener      │ > 0        │ > 0        │ < 0 (flat)   │
+│ Flattener Twist     │ > 0        │ < 0        │ < 0 (flat)   │
+└─────────────────────┴────────────┴────────────┴──────────────┘
+
+Bull/Bear = direction of the level move (both legs same direction).
+Twist = legs move in opposite directions (most violent regime shift).
+"""
+result = pd.DataFrame(index=df_yields_bps.index)
+
+result['short_chg']  = df_yields_bps[short_tenor].diff(lookback)
+result['long_chg']   = df_yields_bps[long_tenor].diff(lookback)
+result['spread_chg'] = result['long_chg'] - result['short_chg']
+
+result = result.dropna()
+
+# Vectorized regime assignment
+conditions = [
+    # Steepeners (spread_chg > 0)
+    (result['spread_chg'] > 0) & (result['short_chg'] <= 0) & (result['long_chg'] <= 0),  # Bull Steep
+    (result['spread_chg'] > 0) & (result['short_chg'] > 0)  & (result['long_chg'] > 0),   # Bear Steep
+    (result['spread_chg'] > 0) & (result['short_chg'] <= 0) & (result['long_chg'] > 0),   # Steep Twist
+
+    # Flatteners (spread_chg < 0)
+    (result['spread_chg'] < 0) & (result['short_chg'] <= 0) & (result['long_chg'] <= 0),  # Bull Flat
+    (result['spread_chg'] < 0) & (result['short_chg'] > 0)  & (result['long_chg'] > 0),   # Bear Flat
+    (result['spread_chg'] < 0) & (result['short_chg'] > 0)  & (result['long_chg'] <= 0),  # Flat Twist
+]
+
+labels = [
+    'Bull Steepener',
+    'Bear Steepener',
+    'Steepener Twist',
+    'Bull Flattener',
+    'Bear Flattener',
+    'Flattener Twist',
+]
+
+result['regime'] = np.select(conditions, labels, default='Neutral')
+
+return result
+```
+
+# ── Run for 2s10s with lookback = 20 ──
+
+LOOKBACK = 20
+
+regimes = classify_regime(yields_bps, ‘2Y’, ‘10Y’, lookback=LOOKBACK)
+
+# Check regime distribution
+
+print(f”Regime classification (2s10s, lookback={LOOKBACK}d):\n”)
+print(regimes[‘regime’].value_counts())
+print(f”\nNeutral count (spread_chg == exactly 0): {(regimes[‘regime’] == ‘Neutral’).sum()}”)
+
+# %% Cell 4 — Regime Chart (static, matching your GMM screenshot)
+
+def plot_regime_chart(regimes_df, spread_name, weeks, lookback):
+“””
+Stacked bar chart of absolute spread changes colored by regime,
+with the spread curve overlaid — matching the GMM tool style.
+
+```
+Parameters
+----------
+regimes_df : DataFrame from classify_regime()
+spread_name : str, e.g. '2s10s'
+weeks : int, number of trailing weeks to display
+lookback : int, the lookback used (for title)
+"""
+# Trim to the last N weeks of business days (~5 per week)
+n_days = weeks * 5
+plot_data = regimes_df.iloc[-n_days:].copy()
+
+# Absolute spread change for bar height
+plot_data['abs_spread_chg'] = plot_data['spread_chg'].abs()
+
+# ── Color map (matching your GMM screenshot) ──
+regime_colors = {
+    'Bull Steepener':   '#4A90D9',   # blue
+    'Bear Steepener':   '#F5A623',   # orange
+    'Steepener Twist':  '#7ED321',   # green
+    'Bull Flattener':   '#D0021B',   # red
+    'Bear Flattener':   '#9B59B6',   # purple
+    'Flattener Twist':  '#8B6914',   # brown
+    'Neutral':          '#666666',   # grey
+}
+
+bar_colors = plot_data['regime'].map(regime_colors)
+
+# ── Figure ──
+fig, ax = plt.subplots(figsize=(16, 6))
+
+# Dark background to match GMM style
+fig.patch.set_facecolor('#1a1a2e')
+ax.set_facecolor('#1a1a2e')
+
+# Bars
+ax.bar(
+    plot_data.index,
+    plot_data['abs_spread_chg'],
+    color=bar_colors,
+    width=1.5,
+    alpha=0.85,
+    edgecolor='none',
 )
-print(df_by_year.to_string())
 
-# show the actual offending dates sorted by worst diff
+# Spread level overlay (use cumulative or spread_chg as proxy for curve shape)
+# We'll overlay the absolute spread change as a line (like the 2s5s curve in GMM)
+ax.plot(
+    plot_data.index,
+    plot_data['abs_spread_chg'],
+    color='#F5A623',
+    linewidth=1.2,
+    alpha=0.9,
+    label=f'{spread_name} Curve',
+)
 
-print(”\nAll dates where ANY tenor exceeds 15 bps - sorted by max diff”)
-print(”=” * 50)
-df[“max_diff”] = df[valid_cols].max(axis=1)
-df[“worst_tenor”] = df[valid_cols].idxmax(axis=1)
-offenders = df[df[“max_diff”] > threshold][[“Fecha”, “Year”, “max_diff”, “worst_tenor”] + valid_cols]
-offenders = offenders.sort_values(“max_diff”, ascending=False).reset_index(drop=True)
-print(f”Total offending dates: {len(offenders)}”)
-print(offenders.head(30).to_string())
+# ── Styling ──
+ax.set_title(
+    f'{spread_name}   (Lookback: {lookback}d  |  Display: {weeks}w)',
+    color='white', fontsize=14, fontweight='bold', pad=12,
+)
+ax.set_ylabel('bps', color='white', fontsize=11)
+
+# Axis colors
+ax.tick_params(colors='white', labelsize=9)
+ax.spines['bottom'].set_color('#333')
+ax.spines['left'].set_color('#333')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+
+# Grid
+ax.yaxis.grid(True, color='#333', linewidth=0.5, alpha=0.7)
+ax.set_axisbelow(True)
+
+# ── Legend ──
+from matplotlib.patches import Patch
+legend_elements = [
+    Patch(facecolor=regime_colors[r], label=r)
+    for r in ['Bull Steepener', 'Bear Steepener', 'Steepener Twist',
+               'Bull Flattener', 'Bear Flattener', 'Flattener Twist']
+]
+legend_elements.append(
+    plt.Line2D([0], [0], color='#F5A623', linewidth=1.5, label=f'{spread_name} Curve')
+)
+leg = ax.legend(
+    handles=legend_elements,
+    loc='upper right',
+    fontsize=9,
+    facecolor='#1a1a2e',
+    edgecolor='#444',
+    labelcolor='white',
+)
+
+# Date formatting on x-axis
+ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%b %y'))
+fig.autofmt_xdate(rotation=45)
+
+plt.tight_layout()
+plt.show()
+
+return fig
+```
+
+# ── Plot: 2s10s, 52 weeks, lookback 20 ──
+
+WEEKS = 52
+fig = plot_regime_chart(regimes, ‘2s10s’, weeks=WEEKS, lookback=LOOKBACK)
+
+# %% Cell 5 — Regime Summary Statistics
+
+def regime_summary(regimes_df, weeks=None):
+“”“Print regime frequency and average spread moves.”””
+data = regimes_df.copy()
+if weeks:
+data = data.iloc[-(weeks * 5):]
+
+```
+summary = data.groupby('regime').agg(
+    count=('spread_chg', 'size'),
+    avg_spread_chg=('spread_chg', 'mean'),
+    avg_short_chg=('short_chg', 'mean'),
+    avg_long_chg=('long_chg', 'mean'),
+).round(2)
+
+summary['pct'] = (summary['count'] / summary['count'].sum() * 100).round(1)
+summary = summary.sort_values('count', ascending=False)
+
+print(f"Regime distribution (last {weeks}w):" if weeks else "Regime distribution (full sample):")
+print(summary.to_string())
+return summary
+```
+
+_ = regime_summary(regimes, weeks=WEEKS)
+
+# %% [markdown]
+
+# ## Regime Logic — Practitioner Rationale
+
+# 
+
+# The classification maps directly to how rates desks think about curve moves:
+
+# 
+
+# **Bull/Bear** refers to the bond market direction (bull = rally = yields falling).
+
+# This is determined by the *sign* of the yield changes on both legs.
+
+# 
+
+# **Steepener/Flattener** is the *spread* direction:
+
+# steepening = long end selling off relative to short end (spread widens).
+
+# 
+
+# **Twist** is the most violent regime — the two legs move in *opposite* directions.
+
+# This typically occurs at major policy pivots (e.g., Fed cutting while long end
+
+# sells off on inflation fears). In a 2-tenor framework, twists are unambiguous:
+
+# if short falls and long rises (or vice versa), it’s a twist.
+
+# 
+
+# The lookback parameter controls the smoothing window. Practitioners typically use:
+
+# - **5d** for tactical/weekly regime reads
+
+# - **20d** (~1 month) for medium-term regime (your default, standard)
+
+# - **60d** for strategic/quarterly regime
+
+# 
+
+# This is consistent with how MS, GS, and Barclays rates strategy
+
+# present curve regime analysis in their research.
