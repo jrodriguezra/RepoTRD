@@ -1,5 +1,15 @@
 # %% [markdown]
 
+# CELL 0 -- paste this first, fix any curly quotes by hand (only 6 quotes to check)
+
+import pathlib
+p = pathlib.Path(r"R:/RScripts/PCA Tools Frodo/PCA Tools Frodo/ust_curve_regime_model.py")
+t = p.read_text(encoding="utf-8")
+for bad, good in [("\u201c",'"'),("\u201d",'"'),("\u2018","'"),("\u2019","'")]:
+    t = t.replace(bad, good)
+p.write_text(t, encoding="utf-8")
+print("Cleaned")
+
 # # UST Curve Regime Model
 
 # Classifies daily curve moves into 6 regimes based on realized changes
