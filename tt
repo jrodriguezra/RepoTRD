@@ -1,140 +1,28 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# identify outlier dates per tenor
+# outlier defined as abs(diff) > mean + 3*std for each tenor
 
-CMT_TENORS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-MIN_BONDS = 3
+cols = [f'{tau}Y' for tau in CMT_TENORS]
+outlier_rows = []
 
-def mc_node_forwards(t, f_disc):
-n = len(t)
-f = np.zeros(n)
-for i in range(1, n - 1):
-h_l = t[i] - t[i - 1]
-h_r = t[i + 1] - t[i]
-f[i] = (f_disc[i - 1] * h_r + f_disc[i] * h_l) / (h_l + h_r)
-f[0] = f_disc[0] - 0.5 * (f[1] - f_disc[0])
-f[-1] = f_disc[-1] - 0.5 * (f[-2] - f_disc[-1])
-return np.maximum(f, 1e-6)
-
-def mc_correct_fwd(f0, fd, f1):
-etas = np.linspace(0.01, 0.99, 300)
-f_cur = (
-f0 * (1 - 4 * etas + 3 * etas**2)
-+ fd * 6 * etas * (1 - etas)
-+ f1 * etas * (-2 + 3 * etas)
-)
-if f_cur.min() >= 0:
-return f0, fd, f1
-g = (
-f0 * (1 - 4 * etas + 3 * etas**2)
-+ f1 * etas * (-2 + 3 * etas)
-)
-w = 6 * etas * (1 - etas)
-mask = w > 1e-12
-fd_new = max(fd, np.max(-g[mask] / w[mask]) + 1e-8)
-return max(f0, 1e-6), fd_new, max(f1, 1e-6)
-
-def mc_yield_at(t_query, t, y_dec, Q, f_disc, f_node):
-hit = np.where(np.abs(t - t_query) < 1e-9)[0]
-if len(hit):
-return float(y_dec[hit[0]] * 100)
-if t_query < t[0] or t_query > t[-1]:
-return np.nan
-i = int(np.clip(int(np.searchsorted(t, t_query, side=‘right’)) - 1, 0, len(t) - 2))
-t0 = t[i]
-t1 = t[i + 1]
-h = t1 - t0
-eta = (t_query - t0) / h
-f0, fd, f1 = mc_correct_fwd(f_node[i], f_disc[i], f_node[i + 1])
-Q_t = Q[i] + h * (
-f0 * (eta - 2 * eta**2 + eta**3)
-+ fd * (3 * eta**2 - 2 * eta**3)
-+ f1 * (-eta**2 + eta**3)
-)
-return float((Q_t / t_query) * 100)
-
-def build_cmt(df_clean, tenors=CMT_TENORS, min_bonds=MIN_BONDS):
-records = []
-skipped = 0
-first_error = None
-df_work = df_clean.copy()
-df_work[‘Fecha’] = pd.to_datetime(df_work[‘Fecha’])
-for date, grp in df_work.groupby(‘Fecha’):
-grp = grp.dropna(subset=[‘Maturity’, ‘FV.Rate’]).sort_values(‘Maturity’).drop_duplicates(‘Maturity’)
-if len(grp) < min_bonds:
-skipped += 1
-continue
-t_raw = grp[‘Maturity’].values
-y_raw = grp[‘FV.Rate’].values
-t_min = t_raw.min()
-t_max = t_raw.max()
-try:
-idx = np.argsort(t_raw)
-t_s = t_raw[idx]
-y_dec = y_raw[idx] / 100.0
-Q = y_dec * t_s
-f_disc = np.diff(Q) / np.diff(t_s)
-f_node = mc_node_forwards(t_s, f_disc)
-row = {‘Fecha’: date}
-for tau in tenors:
-if t_min <= tau <= t_max:
-row[f’{tau}Y’] = round(mc_yield_at(tau, t_s, y_dec, Q, f_disc, f_node), 4)
-else:
-row[f’{tau}Y’] = np.nan
-records.append(row)
-except Exception as e:
-if first_error is None:
-first_error = str(e)
-skipped += 1
-if len(records) == 0:
-print(f’ERROR: 0 records built. skipped={skipped}. First error: {first_error}’)
-return pd.DataFrame()
-df_cmt = pd.DataFrame(records).sort_values(‘Fecha’).reset_index(drop=True)
-df_cmt[‘Fecha’] = pd.to_datetime(df_cmt[‘Fecha’])
-print(f’CMT built: {len(df_cmt):,} dates | skipped: {skipped:,}’)
-return df_cmt
-
-def compare_curves(df_cmt, df_interpol, tenors=CMT_TENORS):
-cols = [f’{tau}Y’ for tau in tenors]
-mc = df_cmt.copy()
-li = df_interpol.copy()
-mc[‘Fecha’] = pd.to_datetime(mc[‘Fecha’])
-li[‘Fecha’] = pd.to_datetime(li[‘Fecha’])
-merged = pd.merge(mc[[‘Fecha’] + cols], li[[‘Fecha’] + cols], on=‘Fecha’, suffixes=(’_mc’, ‘_li’))
-df_diff = pd.DataFrame({‘Fecha’: merged[‘Fecha’]})
 for col in cols:
-df_diff[col] = (merged[f’{col}_mc’] - merged[f’{col}_li’]) * 100
-df_diff = df_diff.dropna(subset=cols, how=‘all’)
-stats = df_diff[cols].describe().T[[‘mean’, ‘std’, ‘min’, ‘25%’, ‘50%’, ‘75%’, ‘max’]]
-stats.columns = [‘Mean’, ‘Std’, ‘Min’, ‘P25’, ‘Median’, ‘P75’, ‘Max’]
-stats = stats.round(3)
-print(’\nDifference MC minus Linear Interpolation (bps)’)
-print(stats.to_string())
-fig, ax = plt.subplots(figsize=(13, 5))
-data_plot = [df_diff[c].dropna().values for c in cols]
-bp = ax.boxplot(
-data_plot,
-tick_labels=cols,
-patch_artist=True,
-medianprops=dict(color=‘black’, linewidth=1.8),
-flierprops=dict(marker=‘o’, markersize=2, alpha=0.3, color=‘grey’),
-whiskerprops=dict(linewidth=1.2),
-capprops=dict(linewidth=1.2)
-)
-colors = plt.cm.RdYlBu(np.linspace(0.1, 0.9, len(cols)))
-for patch, color in zip(bp[‘boxes’], colors):
-patch.set_facecolor(color)
-patch.set_alpha(0.75)
-ax.axhline(0, color=‘black’, linewidth=1.0, linestyle=’–’, alpha=0.7)
-ax.set_title(‘Monotone Convex vs Linear Interpolation — Difference by CMT Node (bps)’, fontsize=12, fontweight=‘bold’)
-ax.set_xlabel(‘CMT Tenor’, fontsize=10)
-ax.set_ylabel(‘MC minus Linear (bps)’, fontsize=10)
-ax.grid(axis=‘y’, linestyle=’:’, alpha=0.5)
-plt.tight_layout()
-plt.savefig(‘cmt_comparison.png’, dpi=150)
-plt.show()
-print(‘Boxplot saved.’)
-return df_diff, stats
+    col_data = df_diff[['Fecha', col]].dropna()
+    mean_v = col_data[col].mean()
+    std_v  = col_data[col].std()
+    cutoff = 3 * std_v
+    mask   = col_data[col].abs() > cutoff
+    flagged = col_data[mask].copy()
+    flagged['Tenor'] = col
+    flagged['Diff_bps'] = flagged[col]
+    outlier_rows.append(flagged[['Fecha', 'Tenor', 'Diff_bps']])
 
-print(‘functions loaded OK’)
-print(‘test:’, mc_yield_at(8, np.array([6.0,10.0,15.0]), np.array([0.07,0.075,0.078]), np.array([0.07,0.075,0.078])*np.array([6.0,10.0,15.0]), np.diff(np.array([0.07,0.075,0.078])*np.array([6.0,10.0,15.0]))/np.diff(np.array([6.0,10.0,15.0])), mc_node_forwards(np.array([6.0,10.0,15.0]), np.diff(np.array([0.07,0.075,0.078])*np.array([6.0,10.0,15.0]))/np.diff(np.array([6.0,10.0,15.0])))))
+df_outliers = pd.concat(outlier_rows).sort_values('Diff_bps', ascending=False)
+df_outliers['Year'] = pd.to_datetime(df_outliers['Fecha']).dt.year
+
+print('Outlier count by year:')
+print(df_outliers.groupby('Year').size().sort_values(ascending=False).to_string())
+
+print('\nOutlier count by year and tenor:')
+print(df_outliers.groupby(['Year', 'Tenor']).size().unstack(fill_value=0).to_string())
+
+print('\nLargest outliers (top 20):')
+print(df_outliers.head(20)[['Fecha', 'Tenor', 'Diff_bps']].to_string())
