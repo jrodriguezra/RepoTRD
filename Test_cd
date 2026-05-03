@@ -1,98 +1,572 @@
-import pandas as pd
+# %% Cell 1 - Imports & Config
+
 import numpy as np
-
-# --- Definición de la Función ---
-def calcular_curva_forward(df_dia, nodos_fijos, dias_shift=1):
-    """
-    Toma un DataFrame de UN SOLO DÍA (con columnas 'Dias' y 'Yield'),
-    interpola la curva base y la curva desplazada, y calcula los forwards.
-    """
-    # 1. Asegurar orden y extraer vectores
-    df_dia = df_dia.sort_values('Dias')
-    dias_conocidos = df_dia['Dias'].values
-    # Asumo que la columna de tasa se llama 'Yield'. Si es 'SBP_rate', cámbialo aquí.
-    yields_conocidos = df_dia['Yield'].values 
-
-    # 2. Interpolación Curva Base (t1, r1)
-    # Si algún nodo es menor al mínimo día disponible, repetirá el primer valor (extrapolación plana)
-    r1_interp = np.interp(nodos_fijos, dias_conocidos, yields_conocidos)
-    t1 = np.array(nodos_fijos)
-    r1 = r1_interp / 100 # Dividir por 100 para la fórmula
-
-    # 3. Interpolación Curva Desplazada (t2, r2)
-    # Creamos los nodos futuros (ej. nodo 7 pasa a ser día 8)
-    t2 = t1 + dias_shift 
-    r2_interp = np.interp(t2, dias_conocidos, yields_conocidos)
-    r2 = r2_interp / 100
-
-    # 4. Cálculo Vectorizado del Forward (Sin bucle for)
-    # Aplicamos la fórmula corregida (usando t1 al final) a todos los elementos a la vez
-    # Usamos np.where para evitar división por cero si el primer nodo es 0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        fwd_calc = (((1 + r2)**(t2 / 360)) / ((1 + r1)**(dias_shift / 360)))**(360 / t1) - 1
-        # Corregir si el primer nodo es 0 (el forward 0d0d no tiene sentido así, suele ser la tasa overnight)
-        fwd_calc = np.where(t1 == 0, r1, fwd_calc) 
-
-    # 5. Crear DataFrame de resultados
-    df_resultado = pd.DataFrame({
-        'Nodo': t1,
-        'Yield_Base': r1_interp,
-        'Forward_Calculado': fwd_calc * 100
-    })
-
-
-
-
-
-
-
-
 import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from scipy import stats
+import warnings
+warnings.filterwarnings(‘ignore’)
 
-# --- CARGA Y PREPARACIÓN DE DATOS ---
-# Cambia las rutas por los nombres o rutas exactas de tus archivos
-df_cdbcrp = pd.read_excel('ruta_a_tu_historico_cdbcrp.xlsx')
-df_tibo = pd.read_excel('ruta_a_tu_historico_tibo.xlsx', sheet_name='Diarias')
+FILE_PATH = ‘Data_historica.xlsx’
 
-# Aseguramos que la columna 'Fecha' sea reconocida como formato de fecha
-df_cdbcrp['Fecha'] = pd.to_datetime(df_cdbcrp['Fecha'])
-df_tibo['Fecha'] = pd.to_datetime(df_tibo['Fecha'])
+# %% Cell 2 - Functions
 
-# Preparar TIBO: Le agregamos el Día 1 y un ISIN referencial para que cuadre
-df_tibo['Dias'] = 1
-df_tibo['ISIN'] = 'TIBO'
+def svensson(m, params):
+b0, b1, b2, b3, t1, t2 = params
+m = np.asarray(m, dtype=float)
+m = np.maximum(m, 0.01)
+mt1 = m / t1
+mt2 = m / t2
+term1 = np.where(mt1 > 1e-8, (1 - np.exp(-mt1)) / mt1, 1.0)
+term2 = np.where(mt1 > 1e-8, term1 - np.exp(-mt1), 0.0)
+term3 = np.where(mt2 > 1e-8, (1 - np.exp(-mt2)) / mt2 - np.exp(-mt2), 0.0)
+return b0 + b1 * term1 + b2 * term2 + b3 * term3
 
-# Juntar ambos históricos (Pandas alinea Fecha, Yield y Dias automáticamente)
-insumos_historicos = pd.concat([df_tibo, df_cdbcrp], ignore_index=True)
+def svensson_objective(params, tenors, yields, durations):
+b0, b1, b2, b3, t1, t2 = params
+if t1 <= 0 or t2 <= 0:
+return 1e10
+fitted = svensson(tenors, params)
+errors = yields - fitted
+weights = 1.0 / np.maximum(durations, 1.0)
+return np.sum(weights * errors**2)
 
+def fit_svensson(tenors, yields, initial_params=None, max_tenor=600.0):
+tenors = np.asarray(tenors, dtype=float)
+yields = np.asarray(yields, dtype=float)
+durations = tenors.copy()
 
-# --- PROCESAMIENTO MASIVO ---
-nodos_deseados = [1, 7, 14, 21, 30, 60, 90, 180, 360] 
-lista_de_resultados = []
+```
+if initial_params is None:
+    long_idx = np.argmax(tenors)
+    short_idx = np.argmin(tenors)
+    b0_init = float(yields[long_idx])
+    b1_init = float(yields[short_idx]) - b0_init
+    initial_params = [b0_init, b1_init, 0.001, 0.0, max_tenor * 0.15, max_tenor * 0.30]
 
-print("Iniciando cálculo masivo...")
+tau_min = 1.0
+tau_max = max_tenor
+bounds = [
+    (None, None),
+    (None, None),
+    (None, None),
+    (None, None),
+    (tau_min, tau_max),
+    (tau_min, tau_max),
+]
 
-for fecha_idx, grupo_df in insumos_historicos.groupby('Fecha'):
-    try:
-        # Usamos tu función matemática intacta
-        df_fwd_dia = calcular_curva_forward(df_dia=grupo_df, 
-                                            nodos_fijos=nodos_deseados, 
-                                            dias_shift=1)
-        
-        # Agregamos la fecha al resultado de ese día
-        df_fwd_dia['Fecha'] = fecha_idx
-        lista_de_resultados.append(df_fwd_dia)
-        
-    except Exception as e:
-        print(f"Error procesando la fecha {fecha_idx.date()}: {e}")
-        continue
+best_result = None
+best_cost = np.inf
 
-# --- RESULTADO FINAL ---
-# Consolidar todo en un solo DataFrame
-df_final_historico = pd.concat(lista_de_resultados, ignore_index=True)
+try:
+    result = minimize(
+        svensson_objective, initial_params,
+        args=(tenors, yields, durations),
+        method='L-BFGS-B', bounds=bounds,
+        options={'maxiter': 5000, 'ftol': 1e-15}
+    )
+    if result.fun < best_cost:
+        best_cost = result.fun
+        best_result = result
+except Exception:
+    pass
 
-# Ordenar columnas para mayor claridad
-df_final_historico = df_final_historico[['Fecha', 'Nodo', 'Yield_Base', 'Forward_Calculado']]
+try:
+    def penalized_obj(p):
+        if p[4] <= 0 or p[5] <= 0 or p[4] > tau_max or p[5] > tau_max:
+            return 1e10
+        return svensson_objective(p, tenors, yields, durations)
 
-print("Cálculo finalizado exitosamente.")
-print(df_final_historico.head(15))
+    result = minimize(
+        penalized_obj, initial_params,
+        method='Nelder-Mead',
+        options={'maxiter': 10000, 'xatol': 1e-10, 'fatol': 1e-15}
+    )
+    if result.x[4] > 0 and result.x[5] > 0 and result.fun < best_cost:
+        best_cost = result.fun
+        best_result = result
+except Exception:
+    pass
+
+try:
+    result = minimize(
+        penalized_obj, initial_params,
+        method='Powell',
+        options={'maxiter': 10000, 'ftol': 1e-15}
+    )
+    if result.x[4] > 0 and result.x[5] > 0 and result.fun < best_cost:
+        best_cost = result.fun
+        best_result = result
+except Exception:
+    pass
+
+if best_result is None:
+    return np.array(initial_params), np.inf
+
+return best_result.x, best_result.fun
+```
+
+def get_tibo(df, date):
+tibo_rows = df[(df[‘Fecha’] == date) & (df[‘ISIN’] == ‘TIBO’)]
+if len(tibo_rows) > 0:
+return tibo_rows[‘Yield’].values[0]
+return np.nan
+
+# %% Cell 3 - Load Data
+
+df = pd.read_excel(FILE_PATH)
+df.columns = [‘Fecha’, ‘ISIN’, ‘Yield’, ‘Dias’]
+df[‘Fecha’] = pd.to_datetime(df[‘Fecha’], dayfirst=True)
+df = df.dropna(subset=[‘Yield’, ‘Dias’])
+df = df[df[‘Dias’] > 0]
+df[‘Yield’] = df[‘Yield’] / 100
+
+all_dates = sorted(df[‘Fecha’].unique())
+print(f’Total dates in file: {len(all_dates)}’)
+print(f’Date range: {all_dates[0].date()} to {all_dates[-1].date()}’)
+
+# build instrument dicts
+
+daily_instruments = {}
+for fecha, grp in df.groupby(‘Fecha’):
+g = grp[grp[‘ISIN’] != ‘TIBO’].copy()
+daily_instruments[fecha] = g[[‘ISIN’, ‘Yield’, ‘Dias’]].reset_index(drop=True)
+
+# %% Cell 4 - Backtest Loop
+
+backtest_dates = all_dates[1:]
+print(f’Backtest dates: {len(backtest_dates)} ({backtest_dates[0].date()} to {backtest_dates[-1].date()})’)
+
+# storage
+
+isin_results = []
+daily_summaries = []
+
+# warm start
+
+prev_params = None
+
+for d_idx, current_date in enumerate(backtest_dates):
+# find previous available date
+current_pos = all_dates.index(current_date)
+prev_date = all_dates[current_pos - 1]
+day_gap = (current_date - prev_date).days
+
+```
+# get TIBO
+tibo = get_tibo(df, current_date)
+if np.isnan(tibo):
+    continue
+
+# previous and current instruments
+if prev_date not in daily_instruments or current_date not in daily_instruments:
+    continue
+prev_inst = daily_instruments[prev_date]
+curr_inst = daily_instruments[current_date]
+
+# identify new issues
+prev_isins_set = set(prev_inst['ISIN'].values)
+curr_isins_set = set(curr_inst['ISIN'].values)
+new_isins = curr_isins_set - prev_isins_set
+has_new_issues = len(new_isins) > 0
+
+# --- Build fitting set ---
+fit_tenors = [1.0]
+fit_yields = [tibo]
+
+# shifted t-1 instruments
+for _, row in prev_inst.iterrows():
+    new_tenor = row['Dias'] - day_gap
+    if new_tenor > 1:
+        fit_tenors.append(float(new_tenor))
+        fit_yields.append(float(row['Yield']))
+
+# new issues (actual yields from today)
+if has_new_issues:
+    new_inst = curr_inst[curr_inst['ISIN'].isin(new_isins)]
+    for _, row in new_inst.iterrows():
+        fit_tenors.append(float(row['Dias']))
+        fit_yields.append(float(row['Yield']))
+
+fit_tenors = np.array(fit_tenors)
+fit_yields = np.array(fit_yields)
+
+# sort
+sort_idx = np.argsort(fit_tenors)
+fit_tenors = fit_tenors[sort_idx]
+fit_yields = fit_yields[sort_idx]
+
+if len(fit_tenors) < 4:
+    continue
+
+# fit Svensson
+max_tenor_fit = fit_tenors.max()
+params, cost = fit_svensson(fit_tenors, fit_yields, initial_params=prev_params, max_tenor=max_tenor_fit)
+prev_params = list(params)
+
+# --- Compare forecast vs actual at each ISIN ---
+curr_isin_map = dict(zip(curr_inst['ISIN'].values, zip(curr_inst['Yield'].values, curr_inst['Dias'].values)))
+
+# also get yesterday's actual yields for directional test
+prev_isin_yield_map = dict(zip(prev_inst['ISIN'].values, prev_inst['Yield'].values))
+
+day_errors = []
+
+for isin, (actual_yield, actual_dias) in curr_isin_map.items():
+    # evaluate forecast svensson at this instrument's actual tenor
+    sv_yield = float(svensson(np.array([actual_dias]), params)[0])
+    err_bps = (sv_yield - actual_yield) * 10000
+
+    # yesterday's yield for this ISIN (for directional test)
+    prev_yield = prev_isin_yield_map.get(isin, np.nan)
+
+    isin_results.append({
+        'Date': current_date,
+        'ISIN': isin,
+        'Tenor': int(actual_dias),
+        'Svensson': sv_yield,
+        'Actual': actual_yield,
+        'Err_bps': err_bps,
+        'Prev_Yield': prev_yield,
+        'Has_New_Issue': has_new_issues,
+        'Is_New_Issue': isin in new_isins,
+    })
+    day_errors.append(err_bps)
+
+day_errors = np.array(day_errors)
+daily_summaries.append({
+    'Date': current_date,
+    'Has_New_Issue': has_new_issues,
+    'N_New_Issues': len(new_isins),
+    'N_Instruments': len(day_errors),
+    'MAE_bps': np.abs(day_errors).mean(),
+    'RMSE_bps': np.sqrt((day_errors**2).mean()),
+    'Max_bps': np.abs(day_errors).max(),
+    'Median_bps': np.abs(day_errors).median(),
+    'Fit_Cost': cost,
+    'Day_Gap': day_gap,
+})
+
+if (d_idx + 1) % 10 == 0:
+    print(f'  Processed {d_idx + 1}/{len(backtest_dates)} dates...')
+```
+
+print(f’\nBacktest complete: {len(daily_summaries)} dates processed’)
+
+isin_df = pd.DataFrame(isin_results)
+daily_df = pd.DataFrame(daily_summaries)
+
+# add tenor buckets
+
+bins = [0, 30, 90, 180, 360, 9999]
+labels_bucket = [’<30d’, ‘30-90d’, ‘90-180d’, ‘180-360d’, ‘>360d’]
+isin_df[‘Bucket’] = pd.cut(isin_df[‘Tenor’], bins=bins, labels=labels_bucket)
+
+# %% Cell 5 - Summary Statistics
+
+print(’\n’ + ‘=’*80)
+print(‘AGGREGATE SVENSSON BACKTEST RESULTS (ISIN-LEVEL)’)
+print(’=’*80)
+
+print(f’\nDates processed: {len(daily_df)}’)
+print(f’  New issue days: {daily_df[“Has_New_Issue”].sum()}’)
+print(f’  No new issue days: {(~daily_df[“Has_New_Issue”]).sum()}’)
+print(f’Total ISIN-date observations: {len(isin_df)}’)
+
+print(f’\n— Overall ISIN-Level Error (bps) —’)
+print(f’  MAE:    {np.abs(isin_df[“Err_bps”]).mean():.2f}’)
+print(f’  RMSE:   {np.sqrt((isin_df[“Err_bps”]**2).mean()):.2f}’)
+print(f’  Median: {np.abs(isin_df[“Err_bps”]).median():.2f}’)
+print(f’  p75:    {np.abs(isin_df[“Err_bps”]).quantile(0.75):.2f}’)
+print(f’  p95:    {np.abs(isin_df[“Err_bps”]).quantile(0.95):.2f}’)
+print(f’  Max:    {np.abs(isin_df[“Err_bps”]).max():.2f}’)
+
+print(f’\n— Daily MAE (bps) —’)
+print(f’  median={daily_df[“MAE_bps”].median():.2f}  mean={daily_df[“MAE_bps”].mean():.2f}  p75={daily_df[“MAE_bps”].quantile(0.75):.2f}  p95={daily_df[“MAE_bps”].quantile(0.95):.2f}  max={daily_df[“MAE_bps”].max():.2f}’)
+
+print(f’\n— Daily Max Abs Error (bps) —’)
+print(f’  median={daily_df[“Max_bps”].median():.2f}  mean={daily_df[“Max_bps”].mean():.2f}  p95={daily_df[“Max_bps”].quantile(0.95):.2f}  max={daily_df[“Max_bps”].max():.2f}’)
+
+# split by new issue
+
+ni_days = daily_df[daily_df[‘Has_New_Issue’]]
+no_ni_days = daily_df[~daily_df[‘Has_New_Issue’]]
+print(f’\n— New Issue Days ({len(ni_days)}) —’)
+if len(ni_days) > 0:
+print(f’  MAE: median={ni_days[“MAE_bps”].median():.2f}  mean={ni_days[“MAE_bps”].mean():.2f}  p95={ni_days[“MAE_bps”].quantile(0.95):.2f}’)
+print(f’\n— No New Issue Days ({len(no_ni_days)}) —’)
+if len(no_ni_days) > 0:
+print(f’  MAE: median={no_ni_days[“MAE_bps”].median():.2f}  mean={no_ni_days[“MAE_bps”].mean():.2f}  p95={no_ni_days[“MAE_bps”].quantile(0.95):.2f}’)
+
+# %% Cell 6 - MAE and RMSE per Tenor Bucket
+
+print(’\n’ + ‘=’*80)
+print(‘ERROR BY TENOR BUCKET (bps)’)
+print(’=’*80)
+
+bucket_stats = isin_df.groupby(‘Bucket’, observed=True).agg(
+N=(‘Err_bps’, ‘count’),
+MAE=(‘Err_bps’, lambda x: np.abs(x).mean()),
+RMSE=(‘Err_bps’, lambda x: np.sqrt((x**2).mean())),
+Median=(‘Err_bps’, lambda x: np.abs(x).median()),
+P95=(‘Err_bps’, lambda x: np.abs(x).quantile(0.95)),
+Max=(‘Err_bps’, lambda x: np.abs(x).max()),
+Mean_Signed=(‘Err_bps’, ‘mean’),
+).round(2)
+print(bucket_stats.to_string())
+
+# also by finer tenor bins (every 30d)
+
+print(’\n— By 30d Tenor Bins —’)
+fine_bins = list(range(0, 601, 30))
+fine_labels = [f’{fine_bins[i]}-{fine_bins[i+1]}d’ for i in range(len(fine_bins)-1)]
+isin_df[‘Fine_Bucket’] = pd.cut(isin_df[‘Tenor’], bins=fine_bins, labels=fine_labels)
+
+fine_stats = isin_df.groupby(‘Fine_Bucket’, observed=True).agg(
+N=(‘Err_bps’, ‘count’),
+MAE=(‘Err_bps’, lambda x: np.abs(x).mean()),
+RMSE=(‘Err_bps’, lambda x: np.sqrt((x**2).mean())),
+Mean_Signed=(‘Err_bps’, ‘mean’),
+).round(2)
+print(fine_stats.to_string())
+
+# %% Cell 7 - Plot 1: Boxplot by Tenor Bucket
+
+fig, ax = plt.subplots(figsize=(14, 6))
+bucket_order = [b for b in labels_bucket if b in isin_df[‘Bucket’].unique()]
+box_data = [isin_df[isin_df[‘Bucket’] == b][‘Err_bps’].values for b in bucket_order]
+bp = ax.boxplot(box_data, positions=range(len(bucket_order)), widths=0.6,
+patch_artist=True, showfliers=True, flierprops={‘markersize’: 2})
+for patch in bp[‘boxes’]:
+patch.set_facecolor(’#4A9B6E’)
+patch.set_alpha(0.6)
+ax.set_xticks(range(len(bucket_order)))
+ax.set_xticklabels(bucket_order, fontsize=10)
+ax.axhline(y=0, color=‘black’, linewidth=0.5)
+ax.set_xlabel(‘Tenor Bucket’)
+ax.set_ylabel(‘Error (bps)’)
+ax.set_title(‘Svensson ISIN-Level Error Distribution by Tenor Bucket’)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(‘svensson_bt_boxplot_bucket.png’, dpi=150, bbox_inches=‘tight’)
+plt.show()
+
+# %% Cell 8 - Plot 2: Boxplot by Fine Tenor Bins
+
+fig, ax = plt.subplots(figsize=(18, 6))
+fine_order = [b for b in fine_labels if b in isin_df[‘Fine_Bucket’].unique()]
+box_data_fine = [isin_df[isin_df[‘Fine_Bucket’] == b][‘Err_bps’].values for b in fine_order]
+
+# filter out empty bins
+
+non_empty = [(b, d) for b, d in zip(fine_order, box_data_fine) if len(d) > 0]
+if len(non_empty) > 0:
+fine_labels_plot, fine_data_plot = zip(*non_empty)
+bp2 = ax.boxplot(fine_data_plot, positions=range(len(fine_labels_plot)), widths=0.6,
+patch_artist=True, showfliers=True, flierprops={‘markersize’: 2})
+for patch in bp2[‘boxes’]:
+patch.set_facecolor(’#4A9B6E’)
+patch.set_alpha(0.6)
+ax.set_xticks(range(len(fine_labels_plot)))
+ax.set_xticklabels(fine_labels_plot, rotation=45, fontsize=8)
+ax.axhline(y=0, color=‘black’, linewidth=0.5)
+ax.set_xlabel(‘Tenor Bin’)
+ax.set_ylabel(‘Error (bps)’)
+ax.set_title(‘Svensson ISIN-Level Error Distribution by 30d Tenor Bins’)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(‘svensson_bt_boxplot_fine.png’, dpi=150, bbox_inches=‘tight’)
+plt.show()
+
+# %% Cell 9 - Plot 3: Daily MAE Time Series
+
+fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
+
+# daily MAE
+
+ax = axes[0]
+daily_sorted = daily_df.sort_values(‘Date’)
+ax.plot(daily_sorted[‘Date’], daily_sorted[‘MAE_bps’], color=’#4A9B6E’, linewidth=0.8, alpha=0.8)
+
+# highlight new issue days
+
+ni_dates = daily_sorted[daily_sorted[‘Has_New_Issue’]]
+ax.scatter(ni_dates[‘Date’], ni_dates[‘MAE_bps’], color=’#D4553A’, s=15, zorder=5, alpha=0.6, label=‘New Issue Day’)
+ax.axhline(y=daily_sorted[‘MAE_bps’].median(), color=‘gray’, linestyle=’–’, linewidth=0.5, label=f’Median={daily_sorted[“MAE_bps”].median():.1f}’)
+ax.set_ylabel(‘MAE (bps)’)
+ax.set_title(‘Daily MAE Over Time’)
+ax.legend(fontsize=8)
+ax.grid(True, alpha=0.3)
+
+# daily max error
+
+ax = axes[1]
+ax.plot(daily_sorted[‘Date’], daily_sorted[‘Max_bps’], color=’#2C5F8A’, linewidth=0.8, alpha=0.8)
+ax.scatter(ni_dates[‘Date’], ni_dates[‘Max_bps’], color=’#D4553A’, s=15, zorder=5, alpha=0.6, label=‘New Issue Day’)
+ax.axhline(y=daily_sorted[‘Max_bps’].median(), color=‘gray’, linestyle=’–’, linewidth=0.5, label=f’Median={daily_sorted[“Max_bps”].median():.1f}’)
+ax.set_ylabel(‘Max Abs Error (bps)’)
+ax.set_title(‘Daily Max Error Over Time’)
+ax.legend(fontsize=8)
+ax.grid(True, alpha=0.3)
+
+plt.xlabel(‘Date’)
+plt.suptitle(‘Svensson Backtest — Daily Error Metrics’, fontsize=13, y=1.01)
+plt.tight_layout()
+plt.savefig(‘svensson_bt_daily_timeseries.png’, dpi=150, bbox_inches=‘tight’)
+plt.show()
+
+# %% Cell 10 - Plot 4: Bell Curves by Tenor Bucket
+
+fig, axes = plt.subplots(1, len(bucket_order), figsize=(4 * len(bucket_order), 5))
+if len(bucket_order) == 1:
+axes = [axes]
+
+for i, bucket in enumerate(bucket_order):
+ax = axes[i]
+errs = isin_df[isin_df[‘Bucket’] == bucket][‘Err_bps’].dropna().values
+if len(errs) < 5:
+ax.set_visible(False)
+continue
+
+```
+ax.hist(errs, bins=30, density=True, color='#4A9B6E', alpha=0.5, edgecolor='white', linewidth=0.5)
+
+mu_fit, std_fit = errs.mean(), errs.std()
+x_range = np.linspace(errs.min() - 1, errs.max() + 1, 200)
+ax.plot(x_range, stats.norm.pdf(x_range, mu_fit, std_fit), color='black', linewidth=1.2)
+
+skew = stats.skew(errs)
+kurt = stats.kurtosis(errs)
+ax.set_title(f'{bucket}', fontsize=11)
+ax.text(0.95, 0.95, f'N={len(errs)}\nmu={mu_fit:.1f}\nsd={std_fit:.1f}\nskew={skew:.2f}\nkurt={kurt:.2f}',
+        transform=ax.transAxes, fontsize=7, va='top', ha='right',
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+ax.axvline(x=0, color='gray', linestyle='--', linewidth=0.5)
+ax.set_xlabel('Error (bps)', fontsize=8)
+```
+
+plt.suptitle(‘Svensson Error Distributions by Tenor Bucket’, fontsize=13, y=1.02)
+plt.tight_layout()
+plt.savefig(‘svensson_bt_bell_curves.png’, dpi=150, bbox_inches=‘tight’)
+plt.show()
+
+# also full distribution
+
+fig, ax = plt.subplots(figsize=(10, 5))
+all_errs = isin_df[‘Err_bps’].dropna().values
+ax.hist(all_errs, bins=50, density=True, color=’#4A9B6E’, alpha=0.5, edgecolor=‘white’, linewidth=0.5)
+mu_all, std_all = all_errs.mean(), all_errs.std()
+x_range = np.linspace(all_errs.min() - 1, all_errs.max() + 1, 300)
+ax.plot(x_range, stats.norm.pdf(x_range, mu_all, std_all), color=‘black’, linewidth=1.5)
+skew_all = stats.skew(all_errs)
+kurt_all = stats.kurtosis(all_errs)
+ax.text(0.95, 0.95, f’N={len(all_errs)}\nmu={mu_all:.2f}\nsd={std_all:.2f}\nskew={skew_all:.2f}\nkurt={kurt_all:.2f}’,
+transform=ax.transAxes, fontsize=9, va=‘top’, ha=‘right’,
+bbox=dict(boxstyle=‘round’, facecolor=‘white’, alpha=0.8))
+ax.axvline(x=0, color=‘gray’, linestyle=’–’, linewidth=0.5)
+ax.set_xlabel(‘Error (bps)’)
+ax.set_ylabel(‘Density’)
+ax.set_title(‘Svensson — All ISIN-Level Errors’)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(‘svensson_bt_bell_all.png’, dpi=150, bbox_inches=‘tight’)
+plt.show()
+
+# %% Cell 11 - Z-Score Directional Test
+
+print(’\n’ + ‘=’*80)
+print(‘DIRECTIONAL PREDICTIVE POWER - Z-SCORE TESTS’)
+print(’=’*80)
+print(’\nTest: does Svensson forecast direction match actual move?’)
+print(‘H0: direction prediction is random (50/50)’)
+print(‘Metric: sign(Svensson(t) - Yield(t-1)) == sign(Yield(t) - Yield(t-1))\n’)
+
+# only ISINs that existed yesterday (have prev_yield)
+
+dir_df = isin_df.dropna(subset=[‘Prev_Yield’]).copy()
+dir_df[‘Sv_Direction’] = np.sign(dir_df[‘Svensson’] - dir_df[‘Prev_Yield’])
+dir_df[‘Actual_Direction’] = np.sign(dir_df[‘Actual’] - dir_df[‘Prev_Yield’])
+dir_df[‘Correct’] = (dir_df[‘Sv_Direction’] == dir_df[‘Actual_Direction’]) & (dir_df[‘Sv_Direction’] != 0)
+dir_df[‘Nonzero’] = (dir_df[‘Sv_Direction’] != 0) & (dir_df[‘Actual_Direction’] != 0)
+
+print(f’{“Bucket”:>12s}  {“N”:>5s}  {“Correct”:>8s}  {“Hit%”:>6s}  {“Z-stat”:>7s}  {“p-value”:>8s}  {“Sig”:>4s}’)
+print(’-’ * 60)
+
+ztest_results = []
+for bucket in bucket_order:
+subset = dir_df[dir_df[‘Bucket’] == bucket]
+nonzero = subset[subset[‘Nonzero’]]
+n = len(nonzero)
+if n < 10:
+continue
+correct = nonzero[‘Correct’].sum()
+hit_rate = correct / n
+z = (hit_rate - 0.5) / np.sqrt(0.25 / n)
+p = 2 * (1 - stats.norm.cdf(abs(z)))
+sig = ‘***’ if p < 0.01 else ’**’ if p < 0.05 else ’*’ if p < 0.10 else ‘’
+print(f’{bucket:>12s}  {n:>5d}  {correct:>8d}  {hit_rate*100:>5.1f}%  {z:>7.2f}  {p:>8.4f}  {sig:>4s}’)
+ztest_results.append({‘Bucket’: bucket, ‘N’: n, ‘Correct’: correct, ‘HitRate’: hit_rate, ‘Z’: z, ‘P’: p})
+
+ztest_df = pd.DataFrame(ztest_results)
+if len(ztest_df) > 0:
+print(f’\nAggregate:’)
+total_n = ztest_df[‘N’].sum()
+total_correct = ztest_df[‘Correct’].sum()
+total_hit = total_correct / total_n
+total_z = (total_hit - 0.5) / np.sqrt(0.25 / total_n)
+total_p = 2 * (1 - stats.norm.cdf(abs(total_z)))
+print(f’  N={total_n}, Correct={total_correct}, Hit={total_hit*100:.1f}%, Z={total_z:.2f}, p={total_p:.4f}’)
+
+# also split by new issue vs no new issue
+
+print(f’\n— Directional Test: New Issue Days —’)
+ni_dir = dir_df[dir_df[‘Has_New_Issue’]]
+ni_nonzero = ni_dir[ni_dir[‘Nonzero’]]
+if len(ni_nonzero) >= 10:
+n = len(ni_nonzero)
+correct = ni_nonzero[‘Correct’].sum()
+hit = correct / n
+z = (hit - 0.5) / np.sqrt(0.25 / n)
+p = 2 * (1 - stats.norm.cdf(abs(z)))
+print(f’  N={n}, Correct={correct}, Hit={hit*100:.1f}%, Z={z:.2f}, p={p:.4f}’)
+
+print(f’\n— Directional Test: No New Issue Days —’)
+no_ni_dir = dir_df[~dir_df[‘Has_New_Issue’]]
+no_ni_nonzero = no_ni_dir[no_ni_dir[‘Nonzero’]]
+if len(no_ni_nonzero) >= 10:
+n = len(no_ni_nonzero)
+correct = no_ni_nonzero[‘Correct’].sum()
+hit = correct / n
+z = (hit - 0.5) / np.sqrt(0.25 / n)
+p = 2 * (1 - stats.norm.cdf(abs(z)))
+print(f’  N={n}, Correct={correct}, Hit={hit*100:.1f}%, Z={z:.2f}, p={p:.4f}’)
+
+# %% Cell 12 - New Issues Analysis
+
+print(’\n’ + ‘=’*80)
+print(‘NEW ISSUE IMPACT ANALYSIS’)
+print(’=’*80)
+
+new_issue_obs = isin_df[isin_df[‘Is_New_Issue’]]
+existing_on_ni_days = isin_df[(isin_df[‘Has_New_Issue’]) & (~isin_df[‘Is_New_Issue’])]
+
+if len(new_issue_obs) > 0:
+print(f’\nNew issue instruments:’)
+print(f’  N: {len(new_issue_obs)}’)
+print(f’  MAE: {np.abs(new_issue_obs[“Err_bps”]).mean():.2f} bps (these are in the fitting set, should be low)’)
+
+if len(existing_on_ni_days) > 0:
+print(f’\nExisting instruments on new issue days:’)
+print(f’  N: {len(existing_on_ni_days)}’)
+print(f’  MAE: {np.abs(existing_on_ni_days[“Err_bps”]).mean():.2f} bps’)
+
+existing_no_ni = isin_df[~isin_df[‘Has_New_Issue’]]
+if len(existing_no_ni) > 0:
+print(f’\nExisting instruments on no-new-issue days:’)
+print(f’  N: {len(existing_no_ni)}’)
+print(f’  MAE: {np.abs(existing_no_ni[“Err_bps”]).mean():.2f} bps’)
+
+print(’\n’ + ‘=’*80)
+print(‘SVENSSON BACKTEST COMPLETE’)
+print(’=’*80)
